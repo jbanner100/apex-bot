@@ -3,25 +3,7 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-# --- Token helpers ------------------------------------------------------------
-def get_secret() -> str:
-    """Read SECRET_TOKEN from environment each time (avoids stale values)."""
-    return os.getenv("1556c05227673418ae208659ab06e6c5", "") or ""
-
-def require_token():
-    """
-    Allow ?token=... (query) or X-Webhook-Token: ... (header).
-    Return a Flask response (403/500) if invalid; return None if OK.
-    """
-    secret = get_secret()
-    token = request.args.get("token") or request.headers.get("X-Webhook-Token")
-    if not secret:
-        return jsonify({"ok": False, "error": "server not configured with SECRET_TOKEN"}), 500
-    if token != secret:
-        return jsonify({"ok": False, "error": "forbidden"}), 403
-    return None
-
-# --- Basic health -------------------------------------------------------------
+# ---- Basic health/diagnostics ------------------------------------------------
 @app.route("/", methods=["GET"])
 def home():
     return "OK", 200
@@ -30,36 +12,35 @@ def home():
 def ping():
     return jsonify({"pong": True}), 200
 
-@app.route("/alive", methods=["GET"])
-def alive_simple():
-    return jsonify({"ok": True, "service": "apex-bot"}), 200
-
-# Optional duplicate health path if you want it:
-@app.route("/__alive__", methods=["GET"])
-def alive_dunder():
-    return jsonify({"ok": True, "service": "apex-bot"}), 200
-
-# --- Diagnostics (leave these in for now) ------------------------------------
 @app.route("/envcheck", methods=["GET"])
 def envcheck():
-    secret = get_secret()
-    return jsonify({"has_secret": bool(secret), "len": len(secret)})
+    s = os.getenv("SECRET_TOKEN", "") or ""
+    return jsonify({"has_secret": bool(s), "len": len(s)})
 
 @app.route("/routes", methods=["GET"])
 def routes():
-    rules = [str(r) for r in app.url_map.iter_rules()]
-    return jsonify({"routes": sorted(rules)})
+    return jsonify({"routes": sorted(str(r) for r in app.url_map.iter_rules())})
 
-# --- Your secured webhook endpoint -------------------------------------------
-@app.route("/webhook_test", methods=["POST", "GET"])
+# ---- Secured webhook ---------------------------------------------------------
+@app.route("/webhook_test", methods=["GET", "POST"])
 def webhook_test():
-    # 🔒 Guard this endpoint with the token
-    guard = require_token()
-    if guard:  # if not None, return the 403/500 response
-        return guard
+    # Read the secret FRESH on each request (no module-level caching)
+    secret = os.getenv("SECRET_TOKEN", "") or ""
+    if not secret:
+        # Include length so we can diagnose without revealing the value
+        return jsonify({"ok": False, "error": "server not configured with SECRET_TOKEN", "len": 0}), 500
+
+    # Accept token via query or header
+    token = request.args.get("token") or request.headers.get("X-Webhook-Token")
 
     if request.method == "GET":
+        if token != secret:
+            return jsonify({"ok": False, "error": "forbidden", "need_token": True}), 403
         return jsonify({"ok": True, "hint": "POST JSON like {'message':'hello'}"}), 200
+
+    # POST
+    if token != secret:
+        return jsonify({"ok": False, "error": "forbidden"}), 403
 
     data = request.get_json(silent=True) or {}
     return jsonify({"received": data, "ok": True}), 200
