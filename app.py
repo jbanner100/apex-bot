@@ -2,11 +2,15 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-@app.get("/__alive__")
+@app.route("/")
+def home():
+    return "OK", 200
+
+@app.route("/__alive__")
 def alive():
     return jsonify({"ok": True, "service": "apex-bot"}), 200
 
-@app.get("/ping")
+@app.route("/ping")
 def ping():
     return jsonify({"pong": True}), 200
 
