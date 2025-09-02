@@ -10,6 +10,11 @@ def home():
 def ping():
     return jsonify({"pong": True}), 200
 
+@app.route("/alive", methods=["GET", "HEAD"])
+def alive_simple():
+    return jsonify({"ok": True, "service": "apex-bot"}), 200
+
+
 @app.route("/__alive__", methods=["GET", "HEAD"])
 def alive():
     return jsonify({"ok": True, "service": "apex-bot"}), 200
