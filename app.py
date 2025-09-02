@@ -42,5 +42,7 @@ def webhook_test():
     if token != secret:
         return jsonify({"ok": False, "error": "forbidden"}), 403
 
-    data = request.get_json(silent=True) or {}
+        data = request.get_json(silent=True) or {}
+    print("[TV] /webhook_test", data, flush=True)  # <-- add this line
     return jsonify({"received": data, "ok": True}), 200
+
