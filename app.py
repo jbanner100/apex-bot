@@ -1,19 +1,19 @@
 import os
 import threading
 from queue import Queue, Empty
-from time import time, sleep
+from time import time
 from flask import Flask, request, jsonify
 
+# Use your simple bot hooks
+import bot_logic as bot
+
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024  # 16 KB cap
 
-# --- Safety: limit inbound payload size (16 KB is plenty for TV) --------------
-app.config["MAX_CONTENT_LENGTH"] = 16 * 1024  # 16 KB
-
-# --- Read SECRET_TOKEN fresh each request -------------------------------------
 def get_secret() -> str:
     return os.getenv("SECRET_TOKEN", "") or ""
 
-# --- Diagnostics / basics -----------------------------------------------------
+# ---------------- diagnostics ----------------
 @app.route("/", methods=["GET"])
 def home():
     return "OK", 200
@@ -40,80 +40,69 @@ def no_cache(resp):
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
-# --- Tiny dispatcher (replace stubs with your real bot calls) -----------------
+# --------------- dispatcher -> bot_logic ---------------
 def handle_vector(side: str, payload: dict):
-    print(f"[DISPATCH] VECTOR {side} | sym={payload.get('symbol')} "
-          f"tf={payload.get('timeframe')} price={payload.get('price')}", flush=True)
-    # TODO: call your real vector handler here (e.g., latch flags / place order)
+    return bot.on_vector(side, payload)
 
 def handle_mf(direction: str, payload: dict):
-    print(f"[DISPATCH] MF {direction} | sym={payload.get('symbol')} "
-          f"tf={payload.get('timeframe')} t={payload.get('timenow')}", flush=True)
-    # TODO: call your real MF handler
+    return bot.on_mf(direction, payload)
 
 def handle_bias(bias: str, payload: dict):
-    print(f"[DISPATCH] BIAS {bias} | sym={payload.get('symbol')} t={payload.get('timenow')}", flush=True)
-    # TODO: update your bias state here
+    return bot.on_bias(bias, payload)
 
 def handle_test_force_entry(side: str, set_bias: str | None, allow_counter: bool, payload: dict):
-    print(f"[DISPATCH] TEST_FORCE side={side} set_bias={set_bias} allow_counter={allow_counter}", flush=True)
-    # TODO: trigger your force-entry path here
+    return bot.on_force_entry(side, set_bias, allow_counter, payload)
 
 def dispatch_tv_payload(payload: dict):
-    """
-    Accepts your existing TradingView messages unchanged.
-      message: "GVC" | "RVC" | "MF UP" | "MF LONG" | "MF DOWN"
-      type: "bias" (bias=LONG/SHORT/NEUTRAL), "test_force_entry"
-    """
     msg = str(payload.get("message", "")).upper().strip()
     typ = str(payload.get("type", "")).lower().strip()
 
-    if msg in ("GVC", "RVC"):  # Vector candles
+    if msg in ("GVC", "RVC"):
         side = "LONG" if msg == "GVC" else "SHORT"
-        handle_vector(side, payload)
-        return {"kind": "vector", "side": side}
+        result = handle_vector(side, payload)
+        return {"kind": "vector", "side": side, "result": result}
 
-    if msg in ("MF UP", "MF LONG", "MF DOWN"):  # Money Flow
+    if msg in ("MF UP", "MF LONG", "MF DOWN"):
         direction = "UP" if ("UP" in msg or "LONG" in msg) else "DOWN"
-        handle_mf(direction, payload)
-        return {"kind": "mf", "direction": direction}
+        result = handle_mf(direction, payload)
+        return {"kind": "mf", "direction": direction, "result": result}
 
-    if typ == "bias":  # Bias update
+    if typ == "bias":
         bias = (payload.get("bias") or "NEUTRAL").upper()
-        handle_bias(bias, payload)
-        return {"kind": "bias", "bias": bias}
+        result = handle_bias(bias, payload)
+        return {"kind": "bias", "bias": bias, "result": result}
 
-    if typ == "test_force_entry":  # Manual test/force
+    if typ == "test_force_entry":
         side = (payload.get("side") or "LONG").upper()
         set_bias = (payload.get("set_bias") or "").upper() or None
         allow_counter = bool(payload.get("allow_counter", False))
-        handle_test_force_entry(side, set_bias, allow_counter, payload)
-        return {"kind": "test_force_entry", "side": side,
-                "set_bias": set_bias, "allow_counter": allow_counter}
+        result = handle_test_force_entry(side, set_bias, allow_counter, payload)
+        return {"kind": "test_force_entry", "side": side, "set_bias": set_bias,
+                "allow_counter": allow_counter, "result": result}
 
     print("[DISPATCH] UNKNOWN payload", payload, flush=True)
     return {"kind": "unknown"}
 
-# --- In-process queue + worker thread (fast webhooks, async handling) ---------
+# --------------- fast webhook via queue ---------------
 EVENTS: Queue = Queue(maxsize=10000)
 
 def event_consumer():
     print("[QUEUE] consumer thread online", flush=True)
     while True:
         try:
-            item = EVENTS.get(timeout=1.0)  # {'payload':..., 'ts':...}
+            item = EVENTS.get(timeout=1.0)
         except Empty:
             continue
         try:
             meta = dispatch_tv_payload(item["payload"])
-            print(f"[QUEUE] processed kind={meta.get('kind')} in {time()-item['ts']:.3f}s", flush=True)
+            took = time() - item["ts"]
+            print(f"[QUEUE] processed kind={meta.get('kind')} in {took:.3f}s | meta={meta}", flush=True)
         except Exception as e:
             print(f"[QUEUE] ERROR processing item: {e}", flush=True)
 
-# Start the consumer as a daemon thread (Render web dyno)
 threading.Thread(target=event_consumer, daemon=True).start()
 
-# --- Single URL with secret (no header/query needed) --------------------------
+# --------------- single URL with URL-secret ---------------
 @app.route("/webhook/<path_secret>", methods=["GET", "POST"])
 def webhook_url_secret(path_secret):
     secret = get_secret()
@@ -122,11 +111,36 @@ def webhook_url_secret(path_secret):
     if path_secret != secret:
         return jsonify({"ok": False, "error": "forbidden"}), 403
 
+    # Browser simulator (no JSON/client needed)
     if request.method == "GET":
+        sim = (request.args.get("simulate") or "").lower()
+        if sim:
+            samples = {
+                "gvc": {"source":"sim","message":"GVC","symbol":"BTCUSDT","timeframe":"5","price":12345,"timenow":"now"},
+                "rvc": {"source":"sim","message":"RVC","symbol":"BTCUSDT","timeframe":"5","price":12345,"timenow":"now"},
+                "mfup": {"source":"sim","message":"MF UP","symbol":"BTCUSDT","timeframe":"5","timenow":"now"},
+                "mfdown": {"source":"sim","message":"MF DOWN","symbol":"BTCUSDT","timeframe":"5","timenow":"now"},
+                "bias_long": {"source":"sim","type":"bias","bias":"LONG","symbol":"BTCUSDT","timenow":"now"},
+                "bias_short": {"source":"sim","type":"bias","bias":"SHORT","symbol":"BTCUSDT","timenow":"now"},
+                "test_short": {"source":"sim","type":"test_force_entry","side":"SHORT","set_bias":"SHORT","allow_counter":True},
+            }
+            payload = samples.get(sim)
+            if not payload:
+                return jsonify({"ok": False, "error": "unknown simulate value"}), 400
+            try:
+                EVENTS.put_nowait({"payload": payload, "ts": time()})
+            except Exception as e:
+                print(f"[QUEUE] DROP (sim full) {e}", flush=True)
+                return jsonify({"ok": False, "queued": False}), 503
+            return jsonify({"ok": True, "simulated": sim, "queued": True}), 200
+
+        # No simulate param → show hint
         return jsonify({"ok": True,
                         "hint": "POST JSON like {'message':'GVC'|'RVC'|'MF UP'|'MF DOWN'} "
-                                "or {'type':'bias','bias':'LONG'} / {'type':'test_force_entry',...}"}), 200
+                                "or {'type':'bias','bias':'LONG'} / {'type':'test_force_entry',...}. "
+                                "Add ?simulate=gvc/rvc/mfup/mfdown/bias_long/bias_short/test_short"}), 200
 
+    # Normal POST path
     payload = request.get_json(silent=True) or {}
     enqueued = False
     try:
@@ -138,6 +152,6 @@ def webhook_url_secret(path_secret):
     print("[TV] /webhook/<secret>", payload, flush=True)
     return jsonify({"ok": True, "enqueued": enqueued, "received": payload}), 200
 
-# --- Local run only (Render uses gunicorn) ------------------------------------
+# Local run (Render uses gunicorn)
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5008")), debug=False)
