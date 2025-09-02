@@ -2,17 +2,17 @@ from flask import Flask, request, jsonify
 
 app = Flask(__name__)
 
-@app.route("/")
+@app.route("/", methods=["GET", "HEAD"])
 def home():
     return "OK", 200
 
-@app.route("/__alive__")
-def alive():
-    return jsonify({"ok": True, "service": "apex-bot"}), 200
-
-@app.route("/ping")
+@app.route("/ping", methods=["GET", "HEAD"])
 def ping():
     return jsonify({"pong": True}), 200
+
+@app.route("/__alive__", methods=["GET", "HEAD"])
+def alive():
+    return jsonify({"ok": True, "service": "apex-bot"}), 200
 
 @app.route("/webhook_test", methods=["POST", "GET"])
 def webhook_test():
