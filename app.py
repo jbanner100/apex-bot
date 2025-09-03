@@ -6,7 +6,6 @@ from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from flask import Flask, request, jsonify
 import itertools
-import pandas as pd
 import ccxt
 
 # === Apex API imports ===
