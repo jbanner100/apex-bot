@@ -1,6 +1,6 @@
 flask==3.0.3
 gunicorn==23.0.0
-numpy==1.26.4
-ccxt==4.3.98
-apexomni
-requests==2.32.3
+ccxt==4.4.20
+# Optional: if you want live trading with ApeX, add:
+# apexomni==0.2.6
+# web3==6.20.3
