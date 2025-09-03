@@ -5,7 +5,6 @@ import time
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from flask import Flask, request, jsonify
-import itertools
 import ccxt
 
 # === Apex API imports ===
@@ -152,113 +151,147 @@ DEBUG_BIAS = globals().get("DEBUG_BIAS", True)
 # === Flask App ===
 app = Flask(__name__)
 app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
-
-# ---------------- EMA / Vector Helpers ----------------
+# ---------------- EMA / Vector Helpers (pandas-free) ----------------
 def fetch_binance_candles(symbol=BINANCE_SYMBOL, interval=CANDLE_INTERVAL, limit=50):
+    """
+    Returns a list of dicts:
+      [{"timestamp": int, "open": float, "high": float, "low": float, "close": float, "volume": float}, ...]
+    """
     try:
         ohlcv = binance.fetch_ohlcv(symbol, timeframe=interval, limit=limit)
-        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
-        df[['open','high','low','close','volume']] = df[['open','high','low','close','volume']].astype(float)
-        return df
+        rows = []
+        for t, o, h, l, c, v in ohlcv:
+            rows.append({
+                "timestamp": int(t),
+                "open": float(o),
+                "high": float(h),
+                "low": float(l),
+                "close": float(c),
+                "volume": float(v),
+            })
+        return rows
     except Exception as e:
         print(f"{now()} ⚠️ Error fetching Binance candles: {e}")
-        return pd.DataFrame()
+        return []
 
-def compute_ema(df, period=EMA_PERIOD):
-    if df is None or df.empty:
-        return df
-    if len(df) < period:
-        df = df.copy()
-        df['ema'] = df['close']
-        return df
-    df = df.copy()
-    df['ema'] = df['close'].ewm(span=period, adjust=False).mean()
-    return df
+def compute_ema(rows, period=EMA_PERIOD):
+    """
+    Adds 'ema' to each row using a standard EMA with smoothing 2/(period+1).
+    Works even if rows < period (EMA warms up from the first close).
+    """
+    if not rows:
+        return []
+    alpha = 2.0 / (period + 1.0)
+    ema_val = None
+    out = []
+    for r in rows:
+        c = float(r["close"])
+        if ema_val is None:
+            ema_val = c
+        else:
+            ema_val = ema_val + alpha * (c - ema_val)
+        r2 = dict(r)
+        r2["ema"] = float(ema_val)
+        out.append(r2)
+    return out
+
+def _tail(rows, n):
+    return rows[-n:] if len(rows) >= n else rows[:]
 
 def ema_stats_line() -> str:
     try:
-        df = fetch_binance_candles(symbol=BINANCE_SYMBOL, interval=CANDLE_INTERVAL,
-                                   limit=VECTOR_PERIOD + EMA_PERIOD)
-        df = compute_ema(df)
-        recent = df.tail(VECTOR_PERIOD)
-        above_count = int((recent["close"] > recent["ema"]).sum())
-        below_count = int((recent["close"] < recent["ema"]).sum())
-        total = int(len(recent)) or 1
-        above_pct = (above_count / total) * 100
-        below_pct = (below_count / total) * 100
-        return f"📈 EMA Stats → Above: {above_count} ({above_pct:.1f}%) | Below: {below_count} ({below_pct:.1f}%)"
+        rows = fetch_binance_candles(symbol=BINANCE_SYMBOL, interval=CANDLE_INTERVAL,
+                                     limit=VECTOR_PERIOD + EMA_PERIOD + 5)
+        rows = compute_ema(rows, period=EMA_PERIOD)
+        recent = _tail(rows, VECTOR_PERIOD)
+        total = max(1, len(recent))
+        above = sum(1 for r in recent if r["close"] > r["ema"])
+        below = sum(1 for r in recent if r["close"] < r["ema"])
+        return f"📈 EMA Stats → Above: {above} ({(above/total)*100:.1f}%) | Below: {below} ({(below/total)*100:.1f}%)"
     except Exception as e:
         return f"📈 EMA Stats → unavailable ({e})"
 
-def log_event(title: str, *lines: str):
-    print(f"{now()} {title}")
-    for ln in lines:
-        if ln:
-            print(f"    {ln}")
-    print(f"    {ema_stats_line()}")
-
-def vector_accepted(df: pd.DataFrame, side: str, threshold: float = VECTOR_THRESHOLD) -> bool:
-    if df is None or df.empty or len(df) < VECTOR_PERIOD + 1:
+def vector_accepted(rows: list, side: str, threshold: float = VECTOR_THRESHOLD) -> bool:
+    """
+    Accept only if:
+      - LONG: vector candle closes > EMA AND fraction of prior VECTOR_PERIOD below EMA >= threshold
+      - SHORT: vector candle closes < EMA AND fraction of prior VECTOR_PERIOD above EMA >= threshold
+    """
+    if not rows or len(rows) < VECTOR_PERIOD + 1:
         return False
-    if 'ema' not in df.columns:
-        df = compute_ema(df)
-    cur = df.iloc[-1]
-    prev = df.iloc[-VECTOR_PERIOD-1:-1]
+    cur = rows[-1]
+    prev = rows[-(VECTOR_PERIOD + 1):-1]
     if side == "LONG":
-        if not (cur['close'] > cur['ema']):
+        if not (cur["close"] > cur.get("ema", cur["close"])):
             return False
-        frac_above = (prev['close'] > prev['ema']).mean()
-        return frac_above < threshold
+        below_ratio = sum(1 for r in prev if r["close"] < r.get("ema", r["close"])) / max(1, len(prev))
+        return below_ratio >= float(threshold)
     else:
-        if not (cur['close'] < cur['ema']):
+        if not (cur["close"] < cur.get("ema", cur["close"])):
             return False
-        frac_below = (prev['close'] < prev['ema']).mean()
-        return frac_below < threshold
+        above_ratio = sum(1 for r in prev if r["close"] > r.get("ema", r["close"])) / max(1, len(prev))
+        return above_ratio >= float(threshold)
 
 # ---------------- Bias (4h) ----------------
 def compute_bias():
+    """
+    Bias is computed on 4h Binance Spot BTC:
+    - Simple BOS using swing highs/lows
+    - EMA slope + price vs EMA
+    Sets global BIAS to 'LONG' / 'SHORT' / None.
+    """
     global BIAS
     try:
         limit = max(EMA_PERIOD + 200, 300)
-        df = fetch_binance_candles(symbol=BINANCE_SYMBOL, interval="4h", limit=limit)
-        if df is None or df.empty:
+        rows = fetch_binance_candles(symbol=BINANCE_SYMBOL, interval="4h", limit=limit)
+        if not rows or len(rows) < EMA_PERIOD + 10:
             BIAS = None
-            if DEBUG_BIAS: print(f"{now()} ⚠️ ICT Bias: insufficient data")
+            if DEBUG_BIAS:
+                print(f"{now()} ⚠️ ICT Bias: insufficient data")
             return
-        df = compute_ema(df, period=EMA_PERIOD)
-        closes = df["close"].values
-        highs  = df["high"].values
-        lows   = df["low"].values
-        emas   = df["ema"].values
+
+        rows = compute_ema(rows, period=EMA_PERIOD)
+        closes = [r["close"] for r in rows]
+        highs  = [r["high"]  for r in rows]
+        lows   = [r["low"]   for r in rows]
+        emas   = [r["ema"]   for r in rows]
 
         lb = int(ICT_SWING_LOOKBACK)
-        swh = [False] * len(df)
-        swl = [False] * len(df)
-        for i in range(lb, len(df) - lb):
-            left_max = max(highs[i - lb:i]); right_max = max(highs[i + 1:i + 1 + lb])
-            if highs[i] > left_max and highs[i] >= right_max: swh[i] = True
-            left_min = min(lows[i - lb:i]); right_min = min(lows[i + 1:i + 1 + lb])
-            if lows[i] < left_min and lows[i] <= right_min: swl[i] = True
+        swh = [False] * len(rows)
+        swl = [False] * len(rows)
+        for i in range(lb, len(rows) - lb):
+            left_max  = max(highs[i - lb:i]); right_max = max(highs[i + 1:i + 1 + lb])
+            if highs[i] > left_max and highs[i] >= right_max:
+                swh[i] = True
+            left_min  = min(lows[i - lb:i]); right_min = min(lows[i + 1:i + 1 + lb])
+            if lows[i] < left_min and lows[i] <= right_min:
+                swl[i] = True
 
         buffer_frac = float(ICT_BOS_BUFFER_PCT) / 100.0
         bos_events = []
-        swh_idx = [i for i, v in enumerate(swh) if v]
-        for i in swh_idx:
-            level = highs[i]; thresh = level * (1.0 + buffer_frac)
-            j = next((k for k in range(i + 1, len(df)) if closes[k] > thresh), None)
-            if j is not None: bos_events.append((j, "UP"))
 
-        swl_idx = [i for i, v in enumerate(swl) if v]
-        for i in swl_idx:
-            level = lows[i]; thresh = level * (1.0 - buffer_frac)
-            j = next((k for k in range(i + 1, len(df)) if closes[k] < thresh), None)
-            if j is not None: bos_events.append((j, "DOWN"))
+        for i, v in enumerate(swh):
+            if v:
+                level = highs[i]; thresh = level * (1.0 + buffer_frac)
+                j = next((k for k in range(i + 1, len(rows)) if closes[k] > thresh), None)
+                if j is not None:
+                    bos_events.append((j, "UP"))
+
+        for i, v in enumerate(swl):
+            if v:
+                level = lows[i]; thresh = level * (1.0 - buffer_frac)
+                j = next((k for k in range(i + 1, len(rows)) if closes[k] < thresh), None)
+                if j is not None:
+                    bos_events.append((j, "DOWN"))
 
         last_bos_dir = None
         if bos_events:
             _, last_bos_dir = max(bos_events, key=lambda x: x[0])
 
-        ema_up = emas[-1] > emas[-1] - emas[-1 - ICT_EMA_SLOPE_BARS] + emas[-1 - ICT_EMA_SLOPE_BARS]  # same as emas[-1] > emas[-1 - k]
+        if len(emas) <= ICT_EMA_SLOPE_BARS:
+            BIAS = None
+            return
+
         ema_up = emas[-1] > emas[-1 - ICT_EMA_SLOPE_BARS]
         ema_down = emas[-1] < emas[-1 - ICT_EMA_SLOPE_BARS]
         price_above = closes[-1] > emas[-1]
@@ -271,9 +304,12 @@ def compute_bias():
             decided = "SHORT"
         else:
             if not ICT_REQUIRE_BOS:
-                if ema_up and price_above: decided = "LONG"
-                elif ema_down and price_below: decided = "SHORT"
-                else: decided = None
+                if ema_up and price_above:
+                    decided = "LONG"
+                elif ema_down and price_below:
+                    decided = "SHORT"
+                else:
+                    decided = None
             else:
                 decided = None
 
@@ -291,6 +327,7 @@ ICT_EMA_SLOPE_BARS = 5
 ICT_SWING_LOOKBACK = 3
 ICT_BOS_BUFFER_PCT = 0.2
 ICT_REQUIRE_BOS = False
+
 # ==================== Diagnostics / Health ====================
 @app.before_request
 def _log_req():
@@ -321,7 +358,7 @@ def _ping():
 def _alive():
     return "ok", 200
 
-# ==================== VECTOR & MF WEBHOOKS + DEV FORCE ENTRY ====================
+# ==================== VECTOR & MF WEBHOOKS ====================
 @app.route('/webhook_vc', methods=['POST', 'GET'], strict_slashes=False)
 def webhook_vector():
     if request.method == 'GET':
@@ -333,34 +370,20 @@ def webhook_vector():
 
     try:
         need = int(EMA_PERIOD) + int(VECTOR_PERIOD) + 5
-        df = fetch_binance_candles(symbol=BINANCE_SYMBOL, interval=CANDLE_INTERVAL, limit=need)
-        df = compute_ema(df, period=EMA_PERIOD)
+        rows = fetch_binance_candles(symbol=BINANCE_SYMBOL, interval=CANDLE_INTERVAL, limit=need)
+        rows = compute_ema(rows, period=EMA_PERIOD)
     except Exception as e:
         print(f"{now()} ⚠️ Error fetching EMA for vector: {e}")
-        df = pd.DataFrame()
+        rows = []
 
-    def _accept_long(dframe: pd.DataFrame) -> bool:
-        if dframe is None or dframe.empty or len(dframe) < VECTOR_PERIOD + 1:
-            return False
-        cur  = dframe.iloc[-1]
-        prev = dframe.iloc[-VECTOR_PERIOD-1:-1]
-        if not (cur['close'] > cur['ema']):
-            return False
-        below_ratio = float((prev['close'] < prev['ema']).mean())
-        return below_ratio >= float(VECTOR_THRESHOLD)
+    def _accept_long(dframe: list) -> bool:
+        return vector_accepted(dframe, "LONG", VECTOR_THRESHOLD)
 
-    def _accept_short(dframe: pd.DataFrame) -> bool:
-        if dframe is None or dframe.empty or len(dframe) < VECTOR_PERIOD + 1:
-            return False
-        cur  = dframe.iloc[-1]
-        prev = dframe.iloc[-VECTOR_PERIOD-1:-1]
-        if not (cur['close'] < cur['ema']):
-            return False
-        above_ratio = float((prev['close'] > prev['ema']).mean())
-        return above_ratio >= float(VECTOR_THRESHOLD)
+    def _accept_short(dframe: list) -> bool:
+        return vector_accepted(dframe, "SHORT", VECTOR_THRESHOLD)
 
     if msg == "GVC":
-        accepted = _accept_long(df)
+        accepted = _accept_long(rows)
         if accepted:
             with POSITION_LOCK:
                 LONG_FLAGS.update({"vector": True, "vector_accepted": True})
@@ -370,16 +393,14 @@ def webhook_vector():
                 SHORT_FLAGS.update({"vector": False, "vector_accepted": False, "mf": False})
                 SHORT_TIMESTAMPS.update({"vector": 0, "mf": 0})
             window_end = ts + int(MF_WAIT_SEC)
-            log_event("🟩 GVC received", "Status: ACCEPTED",
-                      f"MF valid until: {window_end} (± lead {int(MF_LEAD_SEC)}s)")
+            print(f"{now()} 🟩 GVC ACCEPTED — MF valid until {window_end}")
         else:
-            log_event("🟩 GVC received", "Status: REJECTED",
-                      "Existing vector window (if any) remains latched.")
+            print(f"{now()} 🟩 GVC REJECTED — existing window (if any) unchanged")
         return jsonify({"status": "success", "vector": "GVC", "accepted": accepted,
                         "vector_ts": ts if accepted else None}), 200
 
     elif msg == "RVC":
-        accepted = _accept_short(df)
+        accepted = _accept_short(rows)
         if accepted:
             with POSITION_LOCK:
                 SHORT_FLAGS.update({"vector": True, "vector_accepted": True})
@@ -389,11 +410,9 @@ def webhook_vector():
                 LONG_FLAGS.update({"vector": False, "vector_accepted": False, "mf": False})
                 LONG_TIMESTAMPS.update({"vector": 0, "mf": 0})
             window_end = ts + int(MF_WAIT_SEC)
-            log_event("🟥 RVC received", "Status: ACCEPTED",
-                      f"MF valid until: {window_end} (± lead {int(MF_LEAD_SEC)}s)")
+            print(f"{now()} 🟥 RVC ACCEPTED — MF valid until {window_end}")
         else:
-            log_event("🟥 RVC received", "Status: REJECTED",
-                      "Existing vector window (if any) remains latched.")
+            print(f"{now()} 🟥 RVC REJECTED — existing window (if any) unchanged")
         return jsonify({"status": "success", "vector": "RVC", "accepted": accepted,
                         "vector_ts": ts if accepted else None}), 200
 
@@ -432,11 +451,11 @@ def webhook_mf():
 
     if not vector_ts:
         latch_mf(side)
-        log_event(f"🔔 MF {side} latched", f"Awaiting Vector ≤ {int(MF_LEAD_SEC)}s")
+        print(f"{now()} 🔔 MF {side} latched — awaiting Vector ≤ {int(MF_LEAD_SEC)}s")
         return jsonify({"status": "latched", "side": side, "mf_ts": now_ts}), 200
 
     if active_vector_side and side != active_vector_side:
-        log_event(f"⚠️ MF {side} ignored", f"Accepted vector side is {active_vector_side}")
+        print(f"{now()} ⚠️ MF {side} ignored — vector side is {active_vector_side}")
         return jsonify({"status": "ignored", "msg": "MF opposite to accepted vector",
                         "vector_side": active_vector_side, "mf_ts": now_ts,
                         "vector_ts": vector_ts}), 200
@@ -446,13 +465,14 @@ def webhook_mf():
 
     if earliest <= now_ts <= latest:
         latch_mf(side)
-        log_event(f"🔔 MF {side} accepted", f"Within window [{earliest} → {latest}] (vec_ts={vector_ts})")
+        print(f"{now()} 🔔 MF {side} accepted — within [{earliest} → {latest}] (vec_ts={vector_ts})")
         return jsonify({"status": "accepted", "side": side, "mf_ts": now_ts, "vector_ts": vector_ts}), 200
 
-    log_event(f"⚠️ MF {side} ignored", f"Outside window [{earliest} → {latest}] (now={now_ts})")
+    print(f"{now()} ⚠️ MF {side} ignored — outside [{earliest} → {latest}] (now={now_ts})")
     return jsonify({"status": "ignored", "msg": "MF outside window",
                     "mf_ts": now_ts, "vector_ts": vector_ts,
                     "earliest": earliest, "latest": latest}), 200
+# ==================== DEV: FORCE ENTRY ====================
 @app.route('/test/force_entry', methods=['POST', 'GET'], strict_slashes=False, endpoint='test_force_entry_v1')
 def test_force_entry_v1():
     if request.method == 'GET':
@@ -536,7 +556,7 @@ def pick_tp_sl_for(entry_side: str) -> tuple[Decimal, Decimal]:
     else:
         return CTREND_TP_PERCENT, CTREND_SL_PERCENT
 
-# ---------------- Part 3: Orders & Entry ----------------
+# ---------------- Orders & Entry ----------------
 def place_tp_order(close_side: str, trigger_price: Decimal, size: Decimal):
     try:
         sz = round_size_to_step(size, SIZE_STEP)
@@ -705,8 +725,7 @@ def decide_entry():
     if not ALLOW_COUNTER_TREND and BIAS in ("LONG", "SHORT") and proposed != BIAS:
         return None
     return proposed
-# ---------------- Part 4: Monitors ----------------
-# ---------------- Part 4: Monitors ----------------
+# ---------------- Monitors ----------------
 def _status(info) -> str:
     return str((info or {}).get("status", "")).upper()
 
@@ -941,7 +960,7 @@ _start_daemons_once()
 def _boot_threads():
     _start_daemons_once()
 
-# --- Secret-guard wrappers so TV hits these (no headers/queries)  ---
+# --- Secret-guard wrappers so TV hits these (no headers/queries) ---
 def _check_secret(path_secret: str):
     if not SECRET or path_secret != SECRET:
         return jsonify({"ok": False, "error": "forbidden"}), 403
@@ -970,3 +989,5 @@ if __name__ == "__main__":
     _start_daemons_once()
     print(f"{now()} ✅ Bot started and awaiting Vector/MF signals... (ENTRY_ENABLED={ENTRY_ENABLED})")
     app.run(host="0.0.0.0", port=5008, threaded=True, use_reloader=False)
+
+
