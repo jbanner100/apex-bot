@@ -1131,24 +1131,41 @@ def main_loop():
 
 # ---------------- Startup (Render/Gunicorn friendly) ----------------
 _started = False
+_START_LOCK = threading.Lock()
 
 def _start_daemons_once():
-    """Boot the worker threads exactly once (works under Gunicorn and local)."""
+    """Boot worker threads exactly once per process (works under Gunicorn & local)."""
     global _started
     if _started:
         return
-    print(f"{now()} 🚀 Starting threads...")
-    threading.Thread(target=dca_tp_monitor, name="DCA/TP Monitor", daemon=True).start()
-    threading.Thread(target=main_loop,      name="Main Loop",      daemon=True).start()
-    if DASHBOARD_ENABLED:
-        threading.Thread(target=dashboard,  name="Dashboard",      daemon=True).start()
-    threading.Thread(target=bias_monitor,   name="Bias Monitor",   daemon=True).start()
-    print(f"{now()} ✅ Bot started and awaiting Vector/MF signals... (ENTRY_ENABLED={ENTRY_ENABLED})")
-    _started = True
+    with _START_LOCK:
+        if _started:
+            return
+        try:
+            print(f"{now()} 🚀 Starting threads...")
+            existing = {t.name for t in threading.enumerate()}
+
+            if "DCA/TP Monitor" not in existing:
+                threading.Thread(target=dca_tp_monitor, name="DCA/TP Monitor", daemon=True).start()
+
+            if "Main Loop" not in existing:
+                threading.Thread(target=main_loop, name="Main Loop", daemon=True).start()
+
+            if DASHBOARD_ENABLED and "Dashboard" not in existing:
+                threading.Thread(target=dashboard, name="Dashboard", daemon=True).start()
+
+            if "Bias Monitor" not in existing:
+                threading.Thread(target=bias_monitor, name="Bias Monitor", daemon=True).start()
+
+            _started = True
+            print(f"{now()} ✅ Bot started and awaiting Vector/MF signals... (ENTRY_ENABLED={ENTRY_ENABLED})")
+        except Exception as e:
+            # Don't crash the worker; just log it
+            print(f"{now()} ❌ Thread start error: {e}")
 
 # DEBUG: prove the module is importing and the startup is called
 print(f"{now()} 🔧 server.py imported, calling _start_daemons_once()")
-_start_daemons_once()  # <<< CRUCIAL: actually start threads at import time
+_start_daemons_once()  # <<< CRUCIAL: start threads at import time (Gunicorn)
 print(f"{now()} 🔧 _start_daemons_once() returned")
 
 # Safety net: ensure threads are running on any request
@@ -1156,9 +1173,6 @@ print(f"{now()} 🔧 _start_daemons_once() returned")
 def _ensure_threads():
     _start_daemons_once()
 
-# Local run
+# Local run (dev)
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5008, threaded=True, use_reloader=False)
-
-
-
