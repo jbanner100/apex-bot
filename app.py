@@ -224,6 +224,10 @@ def _log_req():
         print(f"{now()} ⇢ {request.method} {request.path} | CT={ct} | len={clen}")
     except Exception as e:
         print(f"{now()} ⇢ {request.method} {request.path} | <log err: {e}>")
+@app.before_request
+def _boot_threads_guard():
+    # Safe + idempotent. Starts worker threads exactly once per process.
+    _start_daemons_once()
 
 @app.after_request
 def _log_resp(resp):
