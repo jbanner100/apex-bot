@@ -1,3 +1,4 @@
-web: gunicorn server:app -b 0.0.0.0:$PORT --access-logfile - --error-logfile -
+web: gunicorn app:app -b 0.0.0.0:$PORT --access-logfile - --error-logfile -
+
 
 
