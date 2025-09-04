@@ -346,6 +346,24 @@ def _ping():
 @app.route('/alive', methods=['GET'])
 def _alive():
     return "ok", 200
+@app.route('/debug/status', methods=['GET'])
+def _debug_status():
+    import threading as _th
+    try:
+        thread_names = [t.name for t in _th.enumerate()]
+    except Exception:
+        thread_names = []
+    return jsonify({
+        "threads": thread_names,
+        "has_main_loop": any(n == "Main Loop" for n in thread_names),
+        "has_dca_tp_monitor": any(n == "DCA/TP Monitor" for n in thread_names),
+        "has_bias_monitor": any(n == "Bias Monitor" for n in thread_names),
+        "entry_enabled": bool(globals().get("ENTRY_ENABLED", True)),
+        "position_open": POSITION.get("open"),
+        "vector_side": POSITION.get("vector_side"),
+        "vector_close_ts": POSITION.get("vector_close_timestamp"),
+    }), 200
+
 
 
 # ==================== VECTOR & MF WEBHOOKS + DEV FORCE ENTRY ====================
@@ -1011,6 +1029,7 @@ def main_loop():
             time.sleep(1)
 
 # ---------------- Startup (Render/Gunicorn friendly) ----------------
+# ---------------- Startup (Render/Gunicorn friendly) ----------------
 _started = False
 
 def _start_daemons_once():
@@ -1027,16 +1046,16 @@ def _start_daemons_once():
     print(f"{now()} ✅ Bot started and awaiting Vector/MF signals... (ENTRY_ENABLED={ENTRY_ENABLED})")
     _started = True
 
-# Start threads immediately on import (so Gunicorn workers run them)
+# DEBUG: prove the module is importing and the startup is called
+print(f"{now()} 🔧 app.py imported, calling _start_daemons_once()")
 _start_daemons_once()
+print(f"{now()} 🔧 _start_daemons_once() returned")
 
-# Extra safety: ensure threads are running on any request
+# Safety net: ensure threads are running on any request
 @app.before_request
 def _ensure_threads():
     _start_daemons_once()
 
-# Local run (for `python app.py`)
+# Local run
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5008, threaded=True, use_reloader=False)
-
-
