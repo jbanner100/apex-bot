@@ -1134,7 +1134,10 @@ _started = False
 _START_LOCK = threading.Lock()
 
 def _start_daemons_once():
-    """Boot worker threads exactly once per process (works under Gunicorn & local)."""
+    """
+    Boot the worker threads exactly once per process (works under Gunicorn and local).
+    Safe to call many times; only the first call in a process starts threads.
+    """
     global _started
     if _started:
         return
@@ -1142,25 +1145,27 @@ def _start_daemons_once():
         if _started:
             return
         try:
-            print(f"{now()} 🚀 Starting threads...")
             existing = {t.name for t in threading.enumerate()}
+            print(f"{now()} 🧵 existing threads before start: {sorted(existing)}")
 
+            print(f"{now()} 🚀 Starting threads...")
             if "DCA/TP Monitor" not in existing:
                 threading.Thread(target=dca_tp_monitor, name="DCA/TP Monitor", daemon=True).start()
-
             if "Main Loop" not in existing:
                 threading.Thread(target=main_loop, name="Main Loop", daemon=True).start()
-
             if DASHBOARD_ENABLED and "Dashboard" not in existing:
                 threading.Thread(target=dashboard, name="Dashboard", daemon=True).start()
-
             if "Bias Monitor" not in existing:
                 threading.Thread(target=bias_monitor, name="Bias Monitor", daemon=True).start()
+
+            # Log after start
+            after = {t.name for t in threading.enumerate()}
+            print(f"{now()} 🧵 threads after start: {sorted(after)}")
 
             _started = True
             print(f"{now()} ✅ Bot started and awaiting Vector/MF signals... (ENTRY_ENABLED={ENTRY_ENABLED})")
         except Exception as e:
-            # Don't crash the worker; just log it
+            # Never crash the worker; just log
             print(f"{now()} ❌ Thread start error: {e}")
 
 # DEBUG: prove the module is importing and the startup is called
@@ -1174,5 +1179,37 @@ def _ensure_threads():
     _start_daemons_once()
 
 # Local run (dev)
+
+@app.route('/__threads__', methods=['GET'])
+def __threads__():
+    """
+    View current threads without starting anything.
+    """
+    import threading as _th
+    names = [t.name for t in _th.enumerate()]
+    return jsonify({"threads": names}), 200
+
+
+@app.route('/__kick__', methods=['GET'])
+def __kick__():
+    """
+    Manually start background threads once (idempotent) and return current thread list.
+    Use this when /debug/status shows has_* = false.
+    """
+    try:
+        _start_daemons_once()
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"kick failed: {e}"}), 500
+
+    import threading as _th
+    names = [t.name for t in _th.enumerate()]
+    return jsonify({
+        "ok": True,
+        "threads": names,
+        "has_main_loop": any(n == "Main Loop" for n in names),
+        "has_dca_tp_monitor": any(n == "DCA/TP Monitor" for n in names),
+        "has_bias_monitor": any(n == "Bias Monitor" for n in names)
+    }), 200
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5008, threaded=True, use_reloader=False)
