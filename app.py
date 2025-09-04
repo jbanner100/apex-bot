@@ -2,6 +2,7 @@
 import os
 import threading
 import time
+import traceback
 from decimal import Decimal, ROUND_DOWN
 from datetime import datetime
 from typing import Tuple
@@ -18,7 +19,7 @@ app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False
 APEX_SYMBOL = "BTC-USDT"
 BINANCE_SYMBOL = "BTC/USDT"      # ccxt spot symbol
 CANDLE_INTERVAL = "5m"           # 5-minute candles for vector/EMA
-TICK_SIZE = Decimal('1')         # adjust to actual exchange tick if needed (e.g., 0.5 / 0.1)
+TICK_SIZE = Decimal('1')         # adjust if needed (e.g., 0.5 or 0.1)
 SIZE_STEP = Decimal('0.001')     # size step
 LEVERAGE = Decimal('10')
 
@@ -50,7 +51,7 @@ VECTOR_PERIOD  = 25
 VECTOR_THRESHOLD = 0.70  # 70% of last VECTOR_PERIOD candles above/below EMA
 
 # Safety / dashboard
-ENTRY_ENABLED     = True   # flip to False for kill-switch (auto-disabled if ApeX SDK missing)
+ENTRY_ENABLED     = True   # flip to False for kill-switch
 DASHBOARD_ENABLED = False  # event-only logs by default (no periodic spam)
 PREV_BIAS         = None
 
@@ -83,11 +84,11 @@ def round_size_to_step(size, step):
 def fmt_size(size):
     return format(Decimal(size).quantize(Decimal('0.000001')), 'f')
 
-# 👉 NEW: accept JSON, form, or raw text for TradingView messages
+# 👉 Accept JSON, form, or raw text for TradingView messages (keeps your message vocabulary)
 def _parse_tv_message(req) -> str:
     """
     Return the alert text in UPPERCASE. Supports JSON, form, or raw text/plain.
-    Keeps your message vocabulary exactly as-is: GVC, RVC, MF UP, MF DOWN.
+    Keeps your message vocabulary exactly as-is: GVC, RVC, MF UP, MF DOWN, MF LONG.
     """
     msg = ""
     data = req.get_json(silent=True)
@@ -111,7 +112,6 @@ except Exception as _e:
     APEX_SDK_OK = False
     APEX_OMNI_HTTP_MAIN = NETWORKID_OMNI_MAIN_ARB = None
     HttpPrivateSign = HttpPublic = None
-   
 
 # === API Credentials (from environment; set in Render dashboard) ===
 api_creds = {
@@ -141,13 +141,11 @@ if APEX_SDK_OK and api_creds["key"] and api_creds["secret"] and api_creds["passp
         print(f"{now()} ❌ ApeX init failed: {e} — NO-TRADING mode.")
         client = None
         http_public = None
-      
 else:
     if not APEX_SDK_OK:
         print(f"{now()} ℹ️ ApeX SDK missing; NO-TRADING mode.")
     else:
         print(f"{now()} ℹ️ ApeX creds not fully set; NO-TRADING mode.")
-    
 
 # ========= Binance (ccxt) =========
 binance = ccxt.binance({"enableRateLimit": True})
@@ -180,6 +178,7 @@ SHORT_TIMESTAMPS = {"vector": 0, "mf": 0}
 # Bias (4h) is source of TP/SL % selection only
 BIAS = None
 DEBUG_BIAS = globals().get("DEBUG_BIAS", True)
+# ---------------- Part 2: EMA/Vector, Bias, Health, Webhooks, VecCheck ----------------
 
 # ---------------- EMA / Vector Helpers ----------------
 def fetch_binance_candles(symbol=BINANCE_SYMBOL, interval=CANDLE_INTERVAL, limit=50):
@@ -224,88 +223,12 @@ def log_event(title: str, *lines: str):
         if ln:
             print(f"    {ln}")
     print(f"    {ema_stats_line()}")
+
 # ---------------- Bias (4h) ----------------
 ICT_EMA_SLOPE_BARS = 5
 ICT_SWING_LOOKBACK = 3
 ICT_BOS_BUFFER_PCT = 0.2
 ICT_REQUIRE_BOS = False
-
-
-def vector_accepted(df: pd.DataFrame, side: str, threshold: float = VECTOR_THRESHOLD) -> bool:
-    """
-    Accept only if:
-      - LONG (GVC): current candle closes > EMA AND the fraction of the *previous* VECTOR_PERIOD
-                    candles with close < EMA is >= threshold
-      - SHORT (RVC): current candle closes < EMA AND the fraction of the *previous* VECTOR_PERIOD
-                     candles with close > EMA is >= threshold
-    Uses the *forming* current candle as 'cur' (like your Mac script).
-    """
-    if df is None or df.empty or len(df) < VECTOR_PERIOD + 1:
-        return False
-    if 'ema' not in df.columns:
-        df = compute_ema(df)
-
-    cur  = df.iloc[-1]                      # forming vector candle
-    prev = df.iloc[-VECTOR_PERIOD-1:-1]     # prior VECTOR_PERIOD closed candles
-
-    if side == "LONG":
-        if not (cur['close'] > cur['ema']):
-            return False
-        below_ratio = float((prev['close'] < prev['ema']).mean())
-        return below_ratio >= float(VECTOR_THRESHOLD)
-    else:  # SHORT
-        if not (cur['close'] < cur['ema']):
-            return False
-        above_ratio = float((prev['close'] > prev['ema']).mean())
-        return above_ratio >= float(VECTOR_THRESHOLD)
-
-
-def vector_window_active() -> bool:
-    ts = POSITION.get("vector_close_timestamp")
-    if not ts:
-        return False
-    now_ts = int(time.time())
-    return (ts - int(MF_LEAD_SEC)) <= now_ts <= (ts + int(MF_WAIT_SEC))
-
-
-def expire_vector_if_out_of_window():
-    """
-    If the Vector window has ended without an entry, clear vector flags & timestamp.
-    """
-    with POSITION_LOCK:
-        ts = POSITION.get("vector_close_timestamp")
-        if not ts:
-            return
-        now_ts = int(time.time())
-        in_window = (ts - int(MF_LEAD_SEC)) <= now_ts <= (ts + int(MF_WAIT_SEC))
-        if in_window:
-            return
-        LONG_FLAGS.update({"vector": False, "vector_accepted": False})
-        SHORT_FLAGS.update({"vector": False, "vector_accepted": False})
-        POSITION["vector_close_timestamp"] = None
-        POSITION["vector_side"] = None
-    print(f"{now()} ⏱️ Vector window expired — cleared vector flags.")
-
-
-def expire_mf_if_stale():
-    """
-    If MF arrived first but no Vector was accepted within MF_LEAD_SEC, clear MF latch.
-    """
-    now_ts = int(time.time())
-    vec_ts = POSITION.get("vector_close_timestamp")
-    if vec_ts is not None:
-        return
-    if LONG_FLAGS.get("mf"):
-        mf_ts = LONG_TIMESTAMPS.get("mf") or 0
-        if now_ts - int(mf_ts) > int(MF_LEAD_SEC):
-            LONG_FLAGS["mf"] = False; LONG_TIMESTAMPS["mf"] = 0
-            print(f"{now()} ⏱️ MF LONG latch expired — no Vector within {int(MF_LEAD_SEC)}s.")
-    if SHORT_FLAGS.get("mf"):
-        mf_ts = SHORT_TIMESTAMPS.get("mf") or 0
-        if now_ts - int(mf_ts) > int(MF_LEAD_SEC):
-            SHORT_FLAGS["mf"] = False; SHORT_TIMESTAMPS["mf"] = 0
-            print(f"{now()} ⏱️ MF SHORT latch expired — no Vector within {int(MF_LEAD_SEC)}s.")
-
 
 def compute_bias():
     """
@@ -356,7 +279,6 @@ def compute_bias():
         if bos_events:
             _, last_bos_dir = max(bos_events, key=lambda x: x[0])
 
-        ema_up   = emas[-1] > emas[-1] - emas[-1 - ICT_EMA_SLOPE_BARS] + emas[-1 - ICT_EMA_SLOPE_BARS]  # (no-op; keep structure)
         ema_up   = emas[-1] > emas[-1 - ICT_EMA_SLOPE_BARS]
         ema_down = emas[-1] < emas[-1 - ICT_EMA_SLOPE_BARS]
         price_above = closes[-1] > emas[-1]
@@ -386,6 +308,7 @@ def compute_bias():
     except Exception as e:
         BIAS = None
         print(f"{now()} ⚠️ ICT Bias error: {e}")
+
 # ==================== Diagnostics / Health ====================
 @app.before_request
 def _log_req():
@@ -437,6 +360,34 @@ def _debug_status():
     }), 200
 
 # ==================== VECTOR & MF WEBHOOKS + DEV FORCE ENTRY ====================
+def vector_accepted(df: pd.DataFrame, side: str, threshold: float = VECTOR_THRESHOLD) -> bool:
+    """
+    Accept only if:
+      - LONG (GVC): current candle closes > EMA AND the fraction of the *previous* VECTOR_PERIOD
+                    candles with close < EMA is >= threshold
+      - SHORT (RVC): current candle closes < EMA AND the fraction of the *previous* VECTOR_PERIOD
+                     candles with close > EMA is >= threshold
+    Uses the *forming* current candle as 'cur' (like your Mac script).
+    """
+    if df is None or df.empty or len(df) < VECTOR_PERIOD + 1:
+        return False
+    if 'ema' not in df.columns:
+        df = compute_ema(df)
+
+    cur  = df.iloc[-1]                      # forming vector candle
+    prev = df.iloc[-VECTOR_PERIOD-1:-1]     # prior VECTOR_PERIOD closed candles
+
+    if side == "LONG":
+        if not (cur['close'] > cur['ema']):
+            return False
+        below_ratio = float((prev['close'] < prev['ema']).mean())
+        return below_ratio >= float(VECTOR_THRESHOLD)
+    else:  # SHORT
+        if not (cur['close'] < cur['ema']):
+            return False
+        above_ratio = float((prev['close'] > prev['ema']).mean())
+        return above_ratio >= float(VECTOR_THRESHOLD)
+
 @app.route('/webhook_vc', methods=['POST', 'GET'], strict_slashes=False)
 def webhook_vector():
     """
@@ -450,7 +401,6 @@ def webhook_vector():
     if request.method == 'GET':
         return jsonify({"ok": True, "hint": 'Send "GVC" or "RVC" (JSON/form/text).'}), 200
 
-    # ✅ robust parse (JSON/form/text)
     msg = _parse_tv_message(request)
     ts = int(time.time())
 
@@ -505,59 +455,6 @@ def webhook_vector():
         print(f"{now()} ⚠️ Invalid vector message: {msg}")
         return jsonify({"status": "error", "msg": "Invalid vector"}), 400
 
-
-@app.route('/test/force_entry', methods=['POST', 'GET'], strict_slashes=False)
-def test_force_entry():
-    """
-    Dev-only: force confluence for LONG or SHORT and let main_loop place the trade.
-    GET returns a usage hint. POST body example:
-      {"side":"LONG"|"SHORT","set_bias":"LONG"|"SHORT"?, "allow_counter":true|false?}
-    """
-    if request.method == 'GET':
-        return jsonify({
-            "ok": True,
-            "hint": 'POST JSON {"side":"LONG|SHORT","set_bias":"LONG|SHORT"?, "allow_counter":true|false?}'
-        }), 200
-
-    # import globals
-    global BIAS, ALLOW_COUNTER_TREND, ENTRY_ENABLED
-    data = request.get_json(silent=True) or {}
-    side = str(data.get("side", "LONG")).upper()
-    if side not in ("LONG", "SHORT"):
-        return jsonify({"status": "error", "msg": "side must be LONG/SHORT"}), 400
-
-    # optional helpers for testing
-    set_bias = data.get("set_bias", None)
-    if isinstance(set_bias, str) and set_bias.upper() in ("LONG", "SHORT"):
-        BIAS = set_bias.upper()
-        print(f"{now()} 🧭 TEST: BIAS set to {BIAS}")
-
-    allow_counter = data.get("allow_counter", None)
-    if allow_counter is True:
-        ALLOW_COUNTER_TREND = True
-        print(f"{now()} 🧪 TEST: ALLOW_COUNTER_TREND forced True")
-
-    ENTRY_ENABLED = True
-
-    now_ts = int(time.time())
-    with POSITION_LOCK:
-        POSITION["vector_close_timestamp"] = now_ts
-        POSITION["vector_side"] = side  # ensure MF/decide_entry sees the latched side
-        if side == "LONG":
-            LONG_FLAGS.update({"vector": True, "vector_accepted": True, "mf": True})
-            LONG_TIMESTAMPS.update({"vector": now_ts, "mf": now_ts})
-            SHORT_FLAGS.update({"vector": False, "vector_accepted": False, "mf": False})
-            SHORT_TIMESTAMPS.update({"vector": 0, "mf": 0})
-        else:
-            SHORT_FLAGS.update({"vector": True, "vector_accepted": True, "mf": True})
-            SHORT_TIMESTAMPS.update({"vector": now_ts, "mf": now_ts})
-            LONG_FLAGS.update({"vector": False, "vector_accepted": False, "mf": False})
-            LONG_TIMESTAMPS.update({"vector": 0, "mf": 0})
-
-    print(f"{now()} ✅ TEST: Forced confluence for {side}. main_loop should place the trade shortly.")
-    return jsonify({"status": "ok", "forced_side": side, "bias": BIAS, "ts": now_ts}), 200
-
-
 @app.route('/webhook_mf', methods=['POST', 'GET'], strict_slashes=False)
 def webhook_mf():
     """
@@ -566,12 +463,11 @@ def webhook_mf():
       • If vector_ts exists → accept MF only if side matches POSITION['vector_side']
         AND MF is within [vec_ts - MF_LEAD_SEC, vec_ts + MF_WAIT_SEC].
       • Latching MF on one side clears the opposite MF latch.
-      • Accepts JSON, form, or text/plain ("MF UP"/"MF DOWN").
+      • Accepts JSON, form, or text/plain.
     """
     if request.method == 'GET':
-        return jsonify({"ok": True, "hint": 'Send "MF UP" or "MF DOWN" (JSON/form/text).'}), 200
+        return jsonify({"ok": True, "hint": 'Send "MF UP" / "MF LONG" / "MF DOWN" (JSON/form/text).'}), 200
 
-    # ✅ robust parse (JSON/form/text)
     msg = _parse_tv_message(request)
     now_ts = int(time.time())
 
@@ -619,6 +515,54 @@ def webhook_mf():
                     "mf_ts": now_ts, "vector_ts": vector_ts,
                     "earliest": earliest, "latest": latest}), 200
 
+@app.route('/test/force_entry', methods=['POST', 'GET'], strict_slashes=False)
+def test_force_entry():
+    """
+    Dev-only: force confluence for LONG or SHORT and let main_loop place the trade.
+    GET returns a usage hint. POST body example:
+      {"side":"LONG"|"SHORT","set_bias":"LONG"|"SHORT"?, "allow_counter":true|false?}
+    """
+    if request.method == 'GET':
+        return jsonify({
+            "ok": True,
+            "hint": 'POST JSON {"side":"LONG|SHORT","set_bias":"LONG|SHORT"?, "allow_counter":true|false?}'
+        }), 200
+
+    global BIAS, ALLOW_COUNTER_TREND, ENTRY_ENABLED
+    data = request.get_json(silent=True) or {}
+    side = str(data.get("side", "LONG")).upper()
+    if side not in ("LONG", "SHORT"):
+        return jsonify({"status": "error", "msg": "side must be LONG/SHORT"}), 400
+
+    set_bias = data.get("set_bias", None)
+    if isinstance(set_bias, str) and set_bias.upper() in ("LONG", "SHORT"):
+        BIAS = set_bias.upper()
+        print(f"{now()} 🧭 TEST: BIAS set to {BIAS}")
+
+    allow_counter = data.get("allow_counter", None)
+    if allow_counter is True:
+        ALLOW_COUNTER_TREND = True
+        print(f"{now()} 🧪 TEST: ALLOW_COUNTER_TREND forced True")
+
+    ENTRY_ENABLED = True
+
+    now_ts = int(time.time())
+    with POSITION_LOCK:
+        POSITION["vector_close_timestamp"] = now_ts
+        POSITION["vector_side"] = side  # ensure MF/decide_entry sees the latched side
+        if side == "LONG":
+            LONG_FLAGS.update({"vector": True, "vector_accepted": True, "mf": True})
+            LONG_TIMESTAMPS.update({"vector": now_ts, "mf": now_ts})
+            SHORT_FLAGS.update({"vector": False, "vector_accepted": False, "mf": False})
+            SHORT_TIMESTAMPS.update({"vector": 0, "mf": 0})
+        else:
+            SHORT_FLAGS.update({"vector": True, "vector_accepted": True, "mf": True})
+            SHORT_TIMESTAMPS.update({"vector": now_ts, "mf": now_ts})
+            LONG_FLAGS.update({"vector": False, "vector_accepted": False, "mf": False})
+            LONG_TIMESTAMPS.update({"vector": 0, "mf": 0})
+
+    print(f"{now()} ✅ TEST: Forced confluence for {side}. main_loop should place the trade shortly.")
+    return jsonify({"status": "ok", "forced_side": side, "bias": BIAS, "ts": now_ts}), 200
 
 @app.route('/debug/veccheck', methods=['GET'])
 def _veccheck():
@@ -642,7 +586,8 @@ def _veccheck():
         "would_accept_GVC": vector_accepted(df, "LONG"),
         "would_accept_RVC": vector_accepted(df, "SHORT"),
     }), 200
-                  
+# ---------------- Part 3: TP/SL Picker, Account Helper, Orders & Entry ----------------
+
 # ---- TP/SL % selection (based on bias at entry) ----
 def pick_tp_sl_for(entry_side: str) -> Tuple[Decimal, Decimal]:
     """
@@ -669,6 +614,7 @@ def get_usdt_contract_balance() -> Decimal:
     except Exception as e:
         print(f"{now()} ⚠️ get_usdt_contract_balance error: {e}")
     return Decimal("0")
+
 # ---------------- Orders & Entry ----------------
 def place_tp_order(close_side: str, trigger_price: Decimal, size: Decimal):
     """
@@ -803,12 +749,12 @@ def place_initial_position(side, tp_percent=None, sl_percent=None):
         # TP/SL based on anchor
         furthest_price = (min(dca_prices) if side == "LONG" else max(dca_prices)) if dca_prices else mark_price_rounded
         if side == "LONG":
-            sl_trigger = round_price_to_tick(furthest_price * (Decimal("1") - sl_percent / Decimal("100")), TICK_SIZE)
-            tp_trigger = round_price_to_tick(mark_price_rounded * (Decimal("1") + tp_percent / Decimal("100")), TICK_SIZE)
+            sl_trigger = round_price_to_tick(furthest_price * (Decimal("1") - sl_percent / Decimal('100')), TICK_SIZE)
+            tp_trigger = round_price_to_tick(mark_price_rounded * (Decimal("1") + tp_percent / Decimal('100')), TICK_SIZE)
             tp_side, sl_side = "SELL", "SELL"
         else:
-            sl_trigger = round_price_to_tick(furthest_price * (Decimal("1") + sl_percent / Decimal("100")), TICK_SIZE)
-            tp_trigger = round_price_to_tick(mark_price_rounded * (Decimal("1") - tp_percent / Decimal("100")), TICK_SIZE)
+            sl_trigger = round_price_to_tick(furthest_price * (Decimal("1") + sl_percent / Decimal('100')), TICK_SIZE)
+            tp_trigger = round_price_to_tick(mark_price_rounded * (Decimal("1") - tp_percent / Decimal('100')), TICK_SIZE)
             tp_side, sl_side = "BUY", "BUY"
 
         # Place TP
@@ -875,6 +821,8 @@ def compute_avg_entry_and_tp():
     else:
         new_tp = round_price_to_tick(avg * (Decimal('1') - tp_percent / Decimal('100')), TICK_SIZE)
     return avg, new_tp
+# ---------------- Part 4: Monitors, Decide Entry, Thread Supervisor, Startup, Run ----------------
+
 # ---------------- Monitors ----------------
 def _status(info) -> str:
     """Upper-cased order status from an ApeX order dict (or '')."""
@@ -1070,6 +1018,46 @@ def bias_monitor():
             print(f"{now()} ⚠️ Bias monitor error: {e}")
             time.sleep(60)
 
+def vector_window_active() -> bool:
+    ts = POSITION.get("vector_close_timestamp")
+    if not ts:
+        return False
+    now_ts = int(time.time())
+    return (ts - int(MF_LEAD_SEC)) <= now_ts <= (ts + int(MF_WAIT_SEC))
+
+def expire_vector_if_out_of_window():
+    """If the Vector window has ended without an entry, clear vector flags & timestamp."""
+    with POSITION_LOCK:
+        ts = POSITION.get("vector_close_timestamp")
+        if not ts:
+            return
+        now_ts = int(time.time())
+        in_window = (ts - int(MF_LEAD_SEC)) <= now_ts <= (ts + int(MF_WAIT_SEC))
+        if in_window:
+            return
+        LONG_FLAGS.update({"vector": False, "vector_accepted": False})
+        SHORT_FLAGS.update({"vector": False, "vector_accepted": False})
+        POSITION["vector_close_timestamp"] = None
+        POSITION["vector_side"] = None
+    print(f"{now()} ⏱️ Vector window expired — cleared vector flags.")
+
+def expire_mf_if_stale():
+    """If MF arrived first but no Vector was accepted within MF_LEAD_SEC, clear MF latch."""
+    now_ts = int(time.time())
+    vec_ts = POSITION.get("vector_close_timestamp")
+    if vec_ts is not None:
+        return
+    if LONG_FLAGS.get("mf"):
+        mf_ts = LONG_TIMESTAMPS.get("mf") or 0
+        if now_ts - int(mf_ts) > int(MF_LEAD_SEC):
+            LONG_FLAGS["mf"] = False; LONG_TIMESTAMPS["mf"] = 0
+            print(f"{now()} ⏱️ MF LONG latch expired — no Vector within {int(MF_LEAD_SEC)}s.")
+    if SHORT_FLAGS.get("mf"):
+        mf_ts = SHORT_TIMESTAMPS.get("mf") or 0
+        if now_ts - int(mf_ts) > int(MF_LEAD_SEC):
+            SHORT_FLAGS["mf"] = False; SHORT_TIMESTAMPS["mf"] = 0
+            print(f"{now()} ⏱️ MF SHORT latch expired — no Vector within {int(MF_LEAD_SEC)}s.")
+
 def decide_entry():
     """
     Confluence requires BOTH signals for the same side AND the MF timestamp
@@ -1096,7 +1084,6 @@ def decide_entry():
         return None
 
     return proposed
-
 
 def main_loop():
     while True:
@@ -1128,8 +1115,7 @@ def main_loop():
             print(f"{now()} ⚠️ Main loop error: {e}")
             time.sleep(1)
 
-
-# ---------------- Startup (Render/Gunicorn friendly) ----------------
+# ---------------- Thread Supervisor (Render/Gunicorn safe) ----------------
 _started = False
 _START_LOCK = threading.Lock()
 
@@ -1158,7 +1144,6 @@ def _start_daemons_once():
             if "Bias Monitor" not in existing:
                 threading.Thread(target=bias_monitor, name="Bias Monitor", daemon=True).start()
 
-            # Log after start
             after = {t.name for t in threading.enumerate()}
             print(f"{now()} 🧵 threads after start: {sorted(after)}")
 
@@ -1166,11 +1151,11 @@ def _start_daemons_once():
             print(f"{now()} ✅ Bot started and awaiting Vector/MF signals... (ENTRY_ENABLED={ENTRY_ENABLED})")
         except Exception as e:
             # Never crash the worker; just log
-            print(f"{now()} ❌ Thread start error: {e}")
+            print(f"{now()} ❌ Thread start error: {e}\n{traceback.format_exc()}")
 
-# DEBUG: prove the module is importing and the startup is called
+# Start threads at import time (works for both python run and gunicorn import)
 print(f"{now()} 🔧 server.py imported, calling _start_daemons_once()")
-_start_daemons_once()  # <<< CRUCIAL: start threads at import time (Gunicorn)
+_start_daemons_once()
 print(f"{now()} 🔧 _start_daemons_once() returned")
 
 # Safety net: ensure threads are running on any request
@@ -1178,31 +1163,19 @@ print(f"{now()} 🔧 _start_daemons_once() returned")
 def _ensure_threads():
     _start_daemons_once()
 
-# Local run (dev)
-
+# Extra diagnostics
 @app.route('/__threads__', methods=['GET'])
 def __threads__():
-    """
-    View current threads without starting anything.
-    """
-    import threading as _th
-    names = [t.name for t in _th.enumerate()]
+    names = [t.name for t in threading.enumerate()]
     return jsonify({"threads": names}), 200
-
 
 @app.route('/__kick__', methods=['GET'])
 def __kick__():
-    """
-    Manually start background threads once (idempotent) and return current thread list.
-    Use this when /debug/status shows has_* = false.
-    """
     try:
         _start_daemons_once()
     except Exception as e:
         return jsonify({"ok": False, "error": f"kick failed: {e}"}), 500
-
-    import threading as _th
-    names = [t.name for t in _th.enumerate()]
+    names = [t.name for t in threading.enumerate()]
     return jsonify({
         "ok": True,
         "threads": names,
@@ -1211,5 +1184,8 @@ def __kick__():
         "has_bias_monitor": any(n == "Bias Monitor" for n in names)
     }), 200
 
+# ---------------- Local run (Render-ready: bind $PORT) ----------------
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5008, threaded=True, use_reloader=False)
+    port = int(os.getenv("PORT", "5008"))  # Render supplies $PORT
+    app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
+
