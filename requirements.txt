@@ -1,6 +1,7 @@
-flask==3.0.3
-gunicorn==23.0.0
-ccxt==4.4.20
-# Optional: if you want live trading with ApeX, add:
-# apexomni==0.2.6
-# web3==6.20.3
+Flask==3.0.3
+gunicorn==21.2.0
+pandas==2.2.2
+numpy==1.26.4
+ccxt==4.3.98
+requests>=2.31.0
+apexomni            # ← if your ApeX SDK is published to the index you’ll use (see Step 3 notes)
