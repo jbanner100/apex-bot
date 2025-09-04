@@ -213,6 +213,75 @@ ICT_SWING_LOOKBACK = 3
 ICT_BOS_BUFFER_PCT = 0.2
 ICT_REQUIRE_BOS = False
 
+
+def vector_accepted_df(df: pd.DataFrame, side: str, threshold: float = VECTOR_THRESHOLD) -> bool:
+    """
+    Accept only if:
+      - LONG (GVC): vector candle closes above EMA AND fraction of prior VECTOR_PERIOD above EMA < threshold
+      - SHORT (RVC): vector candle closes below EMA AND fraction of prior VECTOR_PERIOD below EMA < threshold
+    """
+    if df is None or df.empty or len(df) < VECTOR_PERIOD + 1:
+        return False
+    if 'ema' not in df.columns:
+        df = compute_ema(df)
+
+    cur = df.iloc[-1]
+    prev = df.iloc[-VECTOR_PERIOD-1:-1]
+    if side == "LONG":
+        if not (cur['close'] > cur['ema']):
+            return False
+        frac_above = (prev['close'] > prev['ema']).mean()
+        return frac_above < threshold
+    else:
+        if not (cur['close'] < cur['ema']):
+            return False
+        frac_below = (prev['close'] < prev['ema']).mean()
+        return frac_below < threshold
+
+def vector_window_active() -> bool:
+    """True while inside the MF window around the last accepted vector."""
+    ts = POSITION.get("vector_close_timestamp")
+    if not ts:
+        return False
+    now_ts = int(time.time())
+    return (ts - int(MF_LEAD_SEC)) <= now_ts <= (ts + int(MF_WAIT_SEC))
+
+def expire_vector_if_out_of_window():
+    """If the Vector window ended without entry, clear vector flags & timestamp."""
+    with POSITION_LOCK:
+        ts = POSITION.get("vector_close_timestamp")
+        if not ts:
+            return
+        now_ts = int(time.time())
+        in_window = (ts - int(MF_LEAD_SEC)) <= now_ts <= (ts + int(MF_WAIT_SEC))
+        if in_window:
+            return
+        LONG_FLAGS.update({"vector": False, "vector_accepted": False})
+        SHORT_FLAGS.update({"vector": False, "vector_accepted": False})
+        POSITION["vector_close_timestamp"] = None
+        POSITION["vector_side"] = None
+    print(f"{now()} ⏱️ Vector window expired — cleared vector flags.")
+
+def expire_mf_if_stale():
+    """If MF arrived first but no Vector within MF_LEAD_SEC, clear MF latch."""
+    now_ts = int(time.time())
+    vec_ts = POSITION.get("vector_close_timestamp")
+    if vec_ts is not None:
+        return
+    if LONG_FLAGS.get("mf"):
+        mf_ts = LONG_TIMESTAMPS.get("mf") or 0
+        if now_ts - int(mf_ts) > int(MF_LEAD_SEC):
+            LONG_FLAGS["mf"] = False
+            LONG_TIMESTAMPS["mf"] = 0
+            print(f"{now()} ⏱️ MF LONG latch expired — no Vector within {int(MF_LEAD_SEC)}s.")
+    if SHORT_FLAGS.get("mf"):
+        mf_ts = SHORT_TIMESTAMPS.get("mf") or 0
+        if now_ts - int(mf_ts) > int(MF_LEAD_SEC):
+            SHORT_FLAGS["mf"] = False
+            SHORT_TIMESTAMPS["mf"] = 0
+            print(f"{now()} ⏱️ MF SHORT latch expired — no Vector within {int(MF_LEAD_SEC)}s.")
+
+
 def compute_bias():
     """
     Bias is computed on 4h Binance Spot BTC:
@@ -973,5 +1042,6 @@ def _ensure_threads():
 # Local run
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5008, threaded=True, use_reloader=False)
+
 
 
