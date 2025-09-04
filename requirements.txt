@@ -1,7 +1,5 @@
 Flask==3.0.3
-gunicorn==21.2.0
+gunicorn==23.0.0
 pandas==2.2.2
 numpy==1.26.4
-ccxt==4.3.98
-requests>=2.31.0
-apexomni            # ← if your ApeX SDK is published to the index you’ll use (see Step 3 notes)
+ccxt==4.4.45
