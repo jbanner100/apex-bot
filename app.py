@@ -94,7 +94,7 @@ except Exception as _e:
     APEX_SDK_OK = False
     APEX_OMNI_HTTP_MAIN = NETWORKID_OMNI_MAIN_ARB = None
     HttpPrivateSign = HttpPublic = None
-    ENTRY_ENABLED = False  # disable trading if SDK is missing
+   
 
 # === API Credentials (from environment; set in Render dashboard) ===
 api_creds = {
@@ -124,13 +124,13 @@ if APEX_SDK_OK and api_creds["key"] and api_creds["secret"] and api_creds["passp
         print(f"{now()} ❌ ApeX init failed: {e} — NO-TRADING mode.")
         client = None
         http_public = None
-        ENTRY_ENABLED = False
+      
 else:
     if not APEX_SDK_OK:
         print(f"{now()} ℹ️ ApeX SDK missing; NO-TRADING mode.")
     else:
         print(f"{now()} ℹ️ ApeX creds not fully set; NO-TRADING mode.")
-    ENTRY_ENABLED = False
+    
 
 # ========= Binance (ccxt) =========
 binance = ccxt.binance({"enableRateLimit": True})
@@ -214,40 +214,47 @@ ICT_BOS_BUFFER_PCT = 0.2
 ICT_REQUIRE_BOS = False
 
 
-def vector_accepted_df(df: pd.DataFrame, side: str, threshold: float = VECTOR_THRESHOLD) -> bool:
+def vector_accepted(df: pd.DataFrame, side: str, threshold: float = VECTOR_THRESHOLD) -> bool:
     """
     Accept only if:
-      - LONG (GVC): vector candle closes above EMA AND fraction of prior VECTOR_PERIOD above EMA < threshold
-      - SHORT (RVC): vector candle closes below EMA AND fraction of prior VECTOR_PERIOD below EMA < threshold
+      - LONG (GVC): current candle closes > EMA AND the fraction of the *previous* VECTOR_PERIOD
+                    candles with close < EMA is >= threshold
+      - SHORT (RVC): current candle closes < EMA AND the fraction of the *previous* VECTOR_PERIOD
+                     candles with close > EMA is >= threshold
+    Uses the *forming* current candle as 'cur' (like your Mac script).
     """
     if df is None or df.empty or len(df) < VECTOR_PERIOD + 1:
         return False
     if 'ema' not in df.columns:
         df = compute_ema(df)
 
-    cur = df.iloc[-1]
-    prev = df.iloc[-VECTOR_PERIOD-1:-1]
+    cur  = df.iloc[-1]                      # forming vector candle
+    prev = df.iloc[-VECTOR_PERIOD-1:-1]     # prior VECTOR_PERIOD closed candles
+
     if side == "LONG":
         if not (cur['close'] > cur['ema']):
             return False
-        frac_above = (prev['close'] > prev['ema']).mean()
-        return frac_above < threshold
-    else:
+        below_ratio = float((prev['close'] < prev['ema']).mean())
+        return below_ratio >= float(VECTOR_THRESHOLD)
+    else:  # SHORT
         if not (cur['close'] < cur['ema']):
             return False
-        frac_below = (prev['close'] < prev['ema']).mean()
-        return frac_below < threshold
+        above_ratio = float((prev['close'] > prev['ema']).mean())
+        return above_ratio >= float(VECTOR_THRESHOLD)
+
 
 def vector_window_active() -> bool:
-    """True while inside the MF window around the last accepted vector."""
     ts = POSITION.get("vector_close_timestamp")
     if not ts:
         return False
     now_ts = int(time.time())
     return (ts - int(MF_LEAD_SEC)) <= now_ts <= (ts + int(MF_WAIT_SEC))
 
+
 def expire_vector_if_out_of_window():
-    """If the Vector window ended without entry, clear vector flags & timestamp."""
+    """
+    If the Vector window has ended without an entry, clear vector flags & timestamp.
+    """
     with POSITION_LOCK:
         ts = POSITION.get("vector_close_timestamp")
         if not ts:
@@ -262,8 +269,11 @@ def expire_vector_if_out_of_window():
         POSITION["vector_side"] = None
     print(f"{now()} ⏱️ Vector window expired — cleared vector flags.")
 
+
 def expire_mf_if_stale():
-    """If MF arrived first but no Vector within MF_LEAD_SEC, clear MF latch."""
+    """
+    If MF arrived first but no Vector was accepted within MF_LEAD_SEC, clear MF latch.
+    """
     now_ts = int(time.time())
     vec_ts = POSITION.get("vector_close_timestamp")
     if vec_ts is not None:
@@ -271,14 +281,12 @@ def expire_mf_if_stale():
     if LONG_FLAGS.get("mf"):
         mf_ts = LONG_TIMESTAMPS.get("mf") or 0
         if now_ts - int(mf_ts) > int(MF_LEAD_SEC):
-            LONG_FLAGS["mf"] = False
-            LONG_TIMESTAMPS["mf"] = 0
+            LONG_FLAGS["mf"] = False; LONG_TIMESTAMPS["mf"] = 0
             print(f"{now()} ⏱️ MF LONG latch expired — no Vector within {int(MF_LEAD_SEC)}s.")
     if SHORT_FLAGS.get("mf"):
         mf_ts = SHORT_TIMESTAMPS.get("mf") or 0
         if now_ts - int(mf_ts) > int(MF_LEAD_SEC):
-            SHORT_FLAGS["mf"] = False
-            SHORT_TIMESTAMPS["mf"] = 0
+            SHORT_FLAGS["mf"] = False; SHORT_TIMESTAMPS["mf"] = 0
             print(f"{now()} ⏱️ MF SHORT latch expired — no Vector within {int(MF_LEAD_SEC)}s.")
 
 
@@ -428,7 +436,7 @@ def webhook_vector():
     msg = str(data.get("message", "")).upper()
     ts = int(time.time())
 
-    # Fetch candles for acceptance
+    # Fetch enough candles for a real EMA(50)
     try:
         need = int(EMA_PERIOD) + int(VECTOR_PERIOD) + 5
         df = fetch_binance_candles(symbol=BINANCE_SYMBOL, interval=CANDLE_INTERVAL, limit=need)
@@ -438,7 +446,7 @@ def webhook_vector():
         df = pd.DataFrame()
 
     if msg == "GVC":
-        accepted = vector_accepted_df(df, "LONG")
+        accepted = vector_accepted(df, "LONG")
         if accepted:
             with POSITION_LOCK:
                 LONG_FLAGS.update({"vector": True, "vector_accepted": True})
@@ -457,7 +465,7 @@ def webhook_vector():
                         "vector_ts": ts if accepted else None}), 200
 
     elif msg == "RVC":
-        accepted = vector_accepted_df(df, "SHORT")
+        accepted = vector_accepted(df, "SHORT")
         if accepted:
             with POSITION_LOCK:
                 SHORT_FLAGS.update({"vector": True, "vector_accepted": True})
@@ -478,6 +486,7 @@ def webhook_vector():
     else:
         print(f"{now()} ⚠️ Invalid vector message: {msg}")
         return jsonify({"status": "error", "msg": "Invalid vector"}), 400
+
 
 @app.route('/webhook_mf', methods=['POST', 'GET'], strict_slashes=False)
 def webhook_mf():
@@ -538,6 +547,31 @@ def webhook_mf():
     return jsonify({"status": "ignored", "msg": "MF outside window",
                     "mf_ts": now_ts, "vector_ts": vector_ts,
                     "earliest": earliest, "latest": latest}), 200
+
+
+@app.route('/debug/veccheck', methods=['GET'])
+def _veccheck():
+    need = int(EMA_PERIOD) + int(VECTOR_PERIOD) + 5
+    df = fetch_binance_candles(symbol=BINANCE_SYMBOL, interval=CANDLE_INTERVAL, limit=need)
+    df = compute_ema(df, period=EMA_PERIOD)
+    if df is None or df.empty:
+        return jsonify({"ok": False, "msg": "no data"}), 200
+    cur = df.iloc[-1]
+    prev = df.iloc[-VECTOR_PERIOD-1:-1]
+    frac_above = float((prev['close'] > prev['ema']).mean())
+    frac_below = float((prev['close'] < prev['ema']).mean())
+    return jsonify({
+        "ok": True,
+        "cur_close": float(cur['close']),
+        "cur_ema": float(cur['ema']),
+        "cur_above_ema": bool(cur['close'] > cur['ema']),
+        "prev_frac_above": frac_above,
+        "prev_frac_below": frac_below,
+        "threshold": float(VECTOR_THRESHOLD),
+        "would_accept_GVC": vector_accepted(df, "LONG"),
+        "would_accept_RVC": vector_accepted(df, "SHORT"),
+    }), 200
+                  
 # ---- TP/SL % selection (based on bias at entry) ----
 def pick_tp_sl_for(entry_side: str) -> Tuple[Decimal, Decimal]:
     """
@@ -967,31 +1001,42 @@ def bias_monitor():
 
 def decide_entry():
     """
-    Requires BOTH signals for the same side AND the MF timestamp within
-    [vector_ts - MF_LEAD_SEC, vector_ts + MF_WAIT_SEC]. Vector-first and MF-first supported.
+    Confluence requires BOTH signals for the same side AND the MF timestamp
+    within [vector_ts - MF_LEAD_SEC, vector_ts + MF_WAIT_SEC].
+    NO re-check of EMA here — acceptance was finalized in /webhook_vc.
     """
     long_ready  = bool(LONG_FLAGS.get("vector_accepted")) and bool(LONG_FLAGS.get("mf"))
     short_ready = bool(SHORT_FLAGS.get("vector_accepted")) and bool(SHORT_FLAGS.get("mf"))
     if long_ready == short_ready:
         return None
+
     proposed = "LONG" if long_ready else "SHORT"
     vec_ts = POSITION.get("vector_close_timestamp")
-    if not vec_ts: return None
+    if not vec_ts:
+        return None
+
     mf_ts = int((LONG_TIMESTAMPS if proposed == "LONG" else SHORT_TIMESTAMPS).get("mf") or 0)
-    earliest = vec_ts - int(MF_LEAD_SEC); latest = vec_ts + int(MF_WAIT_SEC)
+    earliest = vec_ts - int(MF_LEAD_SEC)
+    latest   = vec_ts + int(MF_WAIT_SEC)
     if mf_ts < earliest or mf_ts > latest:
         return None
+
     if not ALLOW_COUNTER_TREND and BIAS in ("LONG", "SHORT") and proposed != BIAS:
         return None
+
     return proposed
+
 
 def main_loop():
     while True:
         try:
+            # Maintain latches/windows exactly like your Mac code
             expire_vector_if_out_of_window()
             expire_mf_if_stale()
+
             with POSITION_LOCK:
                 open_ = POSITION["open"]
+
             if ENTRY_ENABLED and not open_:
                 side = decide_entry()
                 if side in ("LONG", "SHORT"):
@@ -1011,6 +1056,7 @@ def main_loop():
         except Exception as e:
             print(f"{now()} ⚠️ Main loop error: {e}")
             time.sleep(1)
+
 
 # ---------------- Startup (Render/Gunicorn friendly) ----------------
 _started = False
@@ -1042,6 +1088,7 @@ def _ensure_threads():
 # Local run
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5008, threaded=True, use_reloader=False)
+
 
 
 
