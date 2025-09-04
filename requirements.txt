@@ -3,8 +3,9 @@ gunicorn==23.0.0
 pandas==2.2.3
 ccxt==4.3.79
 
-# ApeX SDK + deps
+# ApeX SDK deps
 web3>=6,<7
 eth-account>=0.9,<0.13
-apexomni @ git+https://github.com/apex-protocol/apex-omni-sdk-py.git#subdirectory=python
 
+# Try PyPI first
+apexomni
