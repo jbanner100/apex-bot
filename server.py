@@ -337,10 +337,10 @@ def _log_resp(resp):
 @app.route('/', methods=['GET'])
 def _root_ok():
     return jsonify({"ok": True, "ts": int(time.time())}), 200
-
 @app.route('/ping', methods=['GET'])
 def _ping():
-    return "pong", 200
+    return "pong v3", 200
+
 
 @app.route('/__alive__', methods=['GET'])
 @app.route('/alive', methods=['GET'])
@@ -1083,9 +1083,8 @@ def _start_daemons_once():
     _started = True
 
 # DEBUG: prove the module is importing and the startup is called
-print(f"{now()} 🔧 app.py imported, calling _start_daemons_once()")
-_start_daemons_once()
-print(f"{now()} 🔧 _start_daemons_once() returned")
+print(f"{now()} 🔧 server.py imported, calling _start_daemons_once()")
+
 
 # Safety net: ensure threads are running on any request
 @app.before_request
