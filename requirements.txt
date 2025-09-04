@@ -1,5 +1,2 @@
-Flask==3.0.3
+flask==3.0.3
 gunicorn==23.0.0
-pandas==2.2.2
-numpy==1.26.4
-ccxt==4.4.45
