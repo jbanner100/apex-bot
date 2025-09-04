@@ -2,4 +2,5 @@ Flask==3.0.3
 gunicorn==23.0.0
 pandas==2.2.3
 ccxt==4.3.79
-apexomni-x86-windows-linux==3.2.0
+apexomni
+
