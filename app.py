@@ -1185,6 +1185,12 @@ def __kick__():
     }), 200
 
 # ---------------- Local run (Render-ready: bind $PORT) ----------------
+
+# --- EXTRA safety: start threads on first request too ---
+@app.before_first_request
+def _boot_threads_once():
+    _start_daemons_once()
+
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5008"))  # Render supplies $PORT
     app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
