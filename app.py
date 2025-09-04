@@ -51,7 +51,7 @@ VECTOR_THRESHOLD = 0.70  # 70% of last VECTOR_PERIOD candles above/below EMA
 
 # Safety / dashboard
 ENTRY_ENABLED     = True   # flip to False for kill-switch (auto-disabled if ApeX SDK missing)
-DASHBOARD_ENABLED = True  # event-only logs by default (no periodic spam)
+DASHBOARD_ENABLED = False  # event-only logs by default (no periodic spam)
 PREV_BIAS         = None
 
 # --- Debounced flat cleanup (daemon) ---
