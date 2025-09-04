@@ -506,6 +506,58 @@ def webhook_vector():
         return jsonify({"status": "error", "msg": "Invalid vector"}), 400
 
 
+@app.route('/test/force_entry', methods=['POST', 'GET'], strict_slashes=False)
+def test_force_entry():
+    """
+    Dev-only: force confluence for LONG or SHORT and let main_loop place the trade.
+    GET returns a usage hint. POST body example:
+      {"side":"LONG"|"SHORT","set_bias":"LONG"|"SHORT"?, "allow_counter":true|false?}
+    """
+    if request.method == 'GET':
+        return jsonify({
+            "ok": True,
+            "hint": 'POST JSON {"side":"LONG|SHORT","set_bias":"LONG|SHORT"?, "allow_counter":true|false?}'
+        }), 200
+
+    # import globals
+    global BIAS, ALLOW_COUNTER_TREND, ENTRY_ENABLED
+    data = request.get_json(silent=True) or {}
+    side = str(data.get("side", "LONG")).upper()
+    if side not in ("LONG", "SHORT"):
+        return jsonify({"status": "error", "msg": "side must be LONG/SHORT"}), 400
+
+    # optional helpers for testing
+    set_bias = data.get("set_bias", None)
+    if isinstance(set_bias, str) and set_bias.upper() in ("LONG", "SHORT"):
+        BIAS = set_bias.upper()
+        print(f"{now()} 🧭 TEST: BIAS set to {BIAS}")
+
+    allow_counter = data.get("allow_counter", None)
+    if allow_counter is True:
+        ALLOW_COUNTER_TREND = True
+        print(f"{now()} 🧪 TEST: ALLOW_COUNTER_TREND forced True")
+
+    ENTRY_ENABLED = True
+
+    now_ts = int(time.time())
+    with POSITION_LOCK:
+        POSITION["vector_close_timestamp"] = now_ts
+        POSITION["vector_side"] = side  # ensure MF/decide_entry sees the latched side
+        if side == "LONG":
+            LONG_FLAGS.update({"vector": True, "vector_accepted": True, "mf": True})
+            LONG_TIMESTAMPS.update({"vector": now_ts, "mf": now_ts})
+            SHORT_FLAGS.update({"vector": False, "vector_accepted": False, "mf": False})
+            SHORT_TIMESTAMPS.update({"vector": 0, "mf": 0})
+        else:
+            SHORT_FLAGS.update({"vector": True, "vector_accepted": True, "mf": True})
+            SHORT_TIMESTAMPS.update({"vector": now_ts, "mf": now_ts})
+            LONG_FLAGS.update({"vector": False, "vector_accepted": False, "mf": False})
+            LONG_TIMESTAMPS.update({"vector": 0, "mf": 0})
+
+    print(f"{now()} ✅ TEST: Forced confluence for {side}. main_loop should place the trade shortly.")
+    return jsonify({"status": "ok", "forced_side": side, "bias": BIAS, "ts": now_ts}), 200
+
+
 @app.route('/webhook_mf', methods=['POST', 'GET'], strict_slashes=False)
 def webhook_mf():
     """
