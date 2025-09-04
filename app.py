@@ -83,6 +83,23 @@ def round_size_to_step(size, step):
 def fmt_size(size):
     return format(Decimal(size).quantize(Decimal('0.000001')), 'f')
 
+# 👉 NEW: accept JSON, form, or raw text for TradingView messages
+def _parse_tv_message(req) -> str:
+    """
+    Return the alert text in UPPERCASE. Supports JSON, form, or raw text/plain.
+    Keeps your message vocabulary exactly as-is: GVC, RVC, MF UP, MF DOWN.
+    """
+    msg = ""
+    data = req.get_json(silent=True)
+    if isinstance(data, dict):
+        msg = str(data.get("message", "")).strip()
+    if not msg and req.form:
+        msg = str(req.form.get("message", "")).strip()
+    if not msg:
+        raw = req.get_data(as_text=True) or ""
+        msg = raw.strip()
+    return msg.upper()
+
 # ========= ApeX SDK (guarded import; app still boots if missing) =========
 APEX_SDK_OK = True
 try:
@@ -339,6 +356,7 @@ def compute_bias():
         if bos_events:
             _, last_bos_dir = max(bos_events, key=lambda x: x[0])
 
+        ema_up   = emas[-1] > emas[-1] - emas[-1 - ICT_EMA_SLOPE_BARS] + emas[-1 - ICT_EMA_SLOPE_BARS]  # (no-op; keep structure)
         ema_up   = emas[-1] > emas[-1 - ICT_EMA_SLOPE_BARS]
         ema_down = emas[-1] < emas[-1 - ICT_EMA_SLOPE_BARS]
         price_above = closes[-1] > emas[-1]
@@ -368,7 +386,6 @@ def compute_bias():
     except Exception as e:
         BIAS = None
         print(f"{now()} ⚠️ ICT Bias error: {e}")
-
 # ==================== Diagnostics / Health ====================
 @app.before_request
 def _log_req():
@@ -428,12 +445,13 @@ def webhook_vector():
     - Rejected vectors DO NOT clear any existing accepted latch/window.
     - On accept, sets POSITION['vector_close_timestamp'] and POSITION['vector_side'],
       and clears the opposite side's latches.
+    - Accepts JSON, form, or text/plain ("GVC"/"RVC").
     """
     if request.method == 'GET':
-        return jsonify({"ok": True, "hint": 'POST JSON {"message":"GVC"|"RVC"}'}), 200
+        return jsonify({"ok": True, "hint": 'Send "GVC" or "RVC" (JSON/form/text).'}), 200
 
-    data = request.json or {}
-    msg = str(data.get("message", "")).upper()
+    # ✅ robust parse (JSON/form/text)
+    msg = _parse_tv_message(request)
     ts = int(time.time())
 
     # Fetch enough candles for a real EMA(50)
@@ -496,12 +514,13 @@ def webhook_mf():
       • If vector_ts exists → accept MF only if side matches POSITION['vector_side']
         AND MF is within [vec_ts - MF_LEAD_SEC, vec_ts + MF_WAIT_SEC].
       • Latching MF on one side clears the opposite MF latch.
+      • Accepts JSON, form, or text/plain ("MF UP"/"MF DOWN").
     """
     if request.method == 'GET':
-        return jsonify({"ok": True, "hint": 'POST JSON {"message":"MF UP"|"MF LONG"|"MF DOWN"}'}), 200
+        return jsonify({"ok": True, "hint": 'Send "MF UP" or "MF DOWN" (JSON/form/text).'}), 200
 
-    data = request.json or {}
-    msg = str(data.get("message", "")).upper()
+    # ✅ robust parse (JSON/form/text)
+    msg = _parse_tv_message(request)
     now_ts = int(time.time())
 
     if msg in ("MF UP", "MF LONG"):
@@ -598,7 +617,6 @@ def get_usdt_contract_balance() -> Decimal:
     except Exception as e:
         print(f"{now()} ⚠️ get_usdt_contract_balance error: {e}")
     return Decimal("0")
-
 # ---------------- Orders & Entry ----------------
 def place_tp_order(close_side: str, trigger_price: Decimal, size: Decimal):
     """
@@ -707,10 +725,11 @@ def place_initial_position(side, tp_percent=None, sl_percent=None):
         prev_price = mark_price_rounded
         for dca_num in range(1, int(MAX_DCA_COUNT) + 1):
             gap_mult = DCA_STEP_MULTIPLIER ** (dca_num - 1)
-            if side == "LONG":
-                dca_price = prev_price * (Decimal("1") - (DCA_STEP_PERCENT / Decimal("100")) * gap_mult)
-            else:
-                dca_price = prev_price * (Decimal("1") + (DCA_STEP_PERCENT / Decimal("100")) * gap_mult)
+            dca_price = (
+                prev_price * (Decimal("1") - (DCA_STEP_PERCENT / Decimal("100")) * gap_mult)
+                if side == "LONG" else
+                prev_price * (Decimal("1") + (DCA_STEP_PERCENT / Decimal("100")) * gap_mult)
+            )
             dca_price_rounded = round_price_to_tick(dca_price, TICK_SIZE)
             dca_qty = round_size_to_step(initial_size * (DCA_MULTIPLIER ** dca_num), SIZE_STEP)
 
@@ -1088,7 +1107,6 @@ def _ensure_threads():
 # Local run
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5008, threaded=True, use_reloader=False)
-
 
 
 
