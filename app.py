@@ -1010,6 +1010,7 @@ def main_loop():
 
 # ---------------- Startup (Render/Gunicorn friendly) ----------------
 _started = False
+
 def _start_daemons_once():
     """Boot the worker threads exactly once (works under Gunicorn and local)."""
     global _started
@@ -1021,18 +1022,19 @@ def _start_daemons_once():
     if DASHBOARD_ENABLED:
         threading.Thread(target=dashboard,  name="Dashboard",      daemon=True).start()
     threading.Thread(target=bias_monitor,   name="Bias Monitor",   daemon=True).start()
+    print(f"{now()} ✅ Bot started and awaiting Vector/MF signals... (ENTRY_ENABLED={ENTRY_ENABLED})")
     _started = True
 
-# Start threads immediately on import (safe; idempotent)
+# Start threads immediately on import (so Gunicorn workers run them)
 _start_daemons_once()
 
-# Extra guard (idempotent) in case of lazy import scenarios
+# Extra safety: ensure threads are running on any request
 @app.before_request
-def _boot_threads_guard():
+def _ensure_threads():
     _start_daemons_once()
 
-# Local run (Render uses gunicorn with -w 1)
+# Local run (for `python app.py`)
 if __name__ == "__main__":
-    print(f"{now()} ✅ Bot started and awaiting Vector/MF signals... (ENTRY_ENABLED={ENTRY_ENABLED})")
     app.run(host="0.0.0.0", port=5008, threaded=True, use_reloader=False)
+
 
