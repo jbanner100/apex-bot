@@ -679,16 +679,20 @@ def place_initial_position(side, tp_percent=None, sl_percent=None):
         print(f"{now()} ❌ Trading disabled (ApeX SDK/creds not available).")
         return False
     try:
+        # Choose TP/SL %s if not provided
         if tp_percent is None or sl_percent is None:
             tp_percent, sl_percent = pick_tp_sl_for(side)
 
+        # Balance & sizing
         acct = client.get_account_v3()
         usdt_balance = Decimal('0')
         for w in acct.get("contractWallets", []):
             if w.get("token") == "USDT":
-                usdt_balance = Decimal(str(w.get("balance", "0"))); break
+                usdt_balance = Decimal(str(w.get("balance", "0")))
+                break
         if usdt_balance <= 0:
-            print(f"{now()} ❌ USDT balance too low: {usdt_balance}"); return False
+            print(f"{now()} ❌ USDT balance too low: {usdt_balance}")
+            return False
 
         trade_usdt = max(usdt_balance * TRADE_BALANCE_PCT, MIN_ORDER_USDT)
         ticker = http_public.ticker_v3(symbol=APEX_SYMBOL)
@@ -698,15 +702,21 @@ def place_initial_position(side, tp_percent=None, sl_percent=None):
         initial_size = round_size_to_step(raw_size, SIZE_STEP)
         side_str = "BUY" if side == "LONG" else "SELL"
 
+        # MARKET entry
         entry_resp = client.create_order_v3(
-            symbol=APEX_SYMBOL, side=side_str, type="MARKET",
-            size=fmt_size(initial_size), timestampSeconds=int(time.time()),
+            symbol=APEX_SYMBOL,
+            side=side_str,
+            type="MARKET",
+            size=fmt_size(initial_size),
+            timestampSeconds=int(time.time()),
             price=str(mark_price_rounded)
         )
         entry_id = (entry_resp.get("data") or {}).get("id")
         if not entry_id:
-            print(f"{now()} ❌ Initial market order failed: {entry_resp}"); return False
+            print(f"{now()} ❌ Initial market order failed: {entry_resp}")
+            return False
 
+        # DCA ladder (opening LIMIT orders)
         with POSITION_LOCK:
             POSITION["dca_orders"] = []
         dca_prices = []
@@ -714,14 +724,18 @@ def place_initial_position(side, tp_percent=None, sl_percent=None):
         for dca_num in range(1, int(MAX_DCA_COUNT) + 1):
             gap_mult = DCA_STEP_MULTIPLIER ** (dca_num - 1)
             if side == "LONG":
-                dca_price = prev_price * (Decimal("1") - (DCA_STEP_PERCENT / Decimal("100")) * gap_mult))
+                dca_price = prev_price * (Decimal("1") - (DCA_STEP_PERCENT / Decimal("100")) * gap_mult)
             else:
-                dca_price = prev_price * (Decimal("1") + (DCA_STEP_PERCENT / Decimal("100")) * gap_mult))
+                dca_price = prev_price * (Decimal("1") + (DCA_STEP_PERCENT / Decimal("100")) * gap_mult)
             dca_price_rounded = round_price_to_tick(dca_price, TICK_SIZE)
             dca_qty = round_size_to_step(initial_size * (DCA_MULTIPLIER ** dca_num), SIZE_STEP)
+
             dca_resp = client.create_order_v3(
-                symbol=APEX_SYMBOL, side=side_str, type="LIMIT",
-                price=str(dca_price_rounded), size=fmt_size(dca_qty),
+                symbol=APEX_SYMBOL,
+                side=side_str,
+                type="LIMIT",
+                price=str(dca_price_rounded),
+                size=fmt_size(dca_qty),
                 timestampSeconds=int(time.time())
             )
             dca_id = (dca_resp.get("data") or {}).get("id")
@@ -731,40 +745,60 @@ def place_initial_position(side, tp_percent=None, sl_percent=None):
             dca_prices.append(dca_price_rounded)
             prev_price = dca_price_rounded
 
+        # TP/SL triggers
         furthest_price = (min(dca_prices) if side == "LONG" else max(dca_prices)) if dca_prices else mark_price_rounded
         if side == "LONG":
-            sl_trigger = round_price_to_tick(furthest_price * (Decimal("1") - sl_percent/Decimal("100")), TICK_SIZE)
-            tp_trigger = round_price_to_tick(mark_price_rounded * (Decimal("1") + tp_percent/Decimal("100")), TICK_SIZE)
+            sl_trigger = round_price_to_tick(furthest_price * (Decimal("1") - sl_percent / Decimal("100")), TICK_SIZE)
+            tp_trigger = round_price_to_tick(mark_price_rounded * (Decimal("1") + tp_percent / Decimal("100")), TICK_SIZE)
             tp_side, sl_side = "SELL", "SELL"
         else:
-            sl_trigger = round_price_to_tick(furthest_price * (Decimal("1") + sl_percent/Decimal("100")), TICK_SIZE)
-            tp_trigger = round_price_to_tick(mark_price_rounded * (Decimal("1") - tp_percent/Decimal("100")), TICK_SIZE)
+            sl_trigger = round_price_to_tick(furthest_price * (Decimal("1") + sl_percent / Decimal("100")), TICK_SIZE)
+            tp_trigger = round_price_to_tick(mark_price_rounded * (Decimal("1") - tp_percent / Decimal("100")), TICK_SIZE)
             tp_side, sl_side = "BUY", "BUY"
 
+        # Place TP
         tp_resp = client.create_order_v3(
-            symbol=APEX_SYMBOL, side=tp_side, type="TAKE_PROFIT_MARKET",
-            size=fmt_size(initial_size), reduceOnly=True,
-            triggerPrice=str(tp_trigger), price=str(tp_trigger),
+            symbol=APEX_SYMBOL,
+            side=tp_side,
+            type="TAKE_PROFIT_MARKET",
+            size=fmt_size(initial_size),
+            reduceOnly=True,
+            triggerPrice=str(tp_trigger),
+            price=str(tp_trigger),
             timestampSeconds=int(time.time())
         )
         tp_id = (tp_resp.get("data") or {}).get("id")
         print(f"{now()} 🎯 TP placed (TAKE_PROFIT_MARKET) @ {tp_trigger} | id={tp_id}")
 
+        # Place SL
         sl_resp = client.create_order_v3(
-            symbol=APEX_SYMBOL, side=sl_side, type="STOP_MARKET",
-            size=fmt_size(initial_size), reduceOnly=True,
-            triggerPrice=str(sl_trigger), price=str(sl_trigger),
+            symbol=APEX_SYMBOL,
+            side=sl_side,
+            type="STOP_MARKET",
+            size=fmt_size(initial_size),
+            reduceOnly=True,
+            triggerPrice=str(sl_trigger),
+            price=str(sl_trigger),
             timestampSeconds=int(time.time())
         )
         sl_id = (sl_resp.get("data") or {}).get("id")
         print(f"{now()} 🛑 SL placed (STOP_MARKET) @ {sl_trigger} | id={sl_id}")
 
+        # Update local state
         with POSITION_LOCK:
             POSITION.update({
-                "open": True, "side": side, "entry": mark_price_rounded,
-                "size": initial_size, "total_cost": initial_size * mark_price_rounded,
-                "dca_count": 0, "tp": tp_trigger, "tp_id": tp_id,
-                "sl": sl_trigger, "sl_id": sl_id, "tp_percent": tp_percent, "sl_percent": sl_percent
+                "open": True,
+                "side": side,
+                "entry": mark_price_rounded,
+                "size": initial_size,
+                "total_cost": initial_size * mark_price_rounded,
+                "dca_count": 0,
+                "tp": tp_trigger,
+                "tp_id": tp_id,
+                "sl": sl_trigger,
+                "sl_id": sl_id,
+                "tp_percent": tp_percent,
+                "sl_percent": sl_percent
             })
         print(f"{now()} ✅ {side} market order placed: {initial_size} BTC @ {mark_price_rounded}")
         return True
@@ -772,6 +806,7 @@ def place_initial_position(side, tp_percent=None, sl_percent=None):
     except Exception as e:
         print(f"{now()} ❌ Error placing position: {e}")
         return False
+
 
 # ---- TP recompute helper (weighted after DCA fills) ----
 def compute_avg_entry_and_tp():
