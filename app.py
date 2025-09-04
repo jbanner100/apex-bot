@@ -343,8 +343,10 @@ def _ping():
     return "pong", 200
 
 @app.route('/__alive__', methods=['GET'])
+@app.route('/alive', methods=['GET'])
 def _alive():
     return "ok", 200
+
 
 # ==================== VECTOR & MF WEBHOOKS + DEV FORCE ENTRY ====================
 @app.route('/webhook_vc', methods=['POST', 'GET'], strict_slashes=False)
