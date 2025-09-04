@@ -679,7 +679,7 @@ def place_initial_position(side, tp_percent=None, sl_percent=None):
         print(f"{now()} ❌ Trading disabled (ApeX SDK/creds not available).")
         return False
     try:
-        # Choose TP/SL %s if not provided
+        # Pick TP/SL % if not provided
         if tp_percent is None or sl_percent is None:
             tp_percent, sl_percent = pick_tp_sl_for(side)
 
@@ -716,7 +716,7 @@ def place_initial_position(side, tp_percent=None, sl_percent=None):
             print(f"{now()} ❌ Initial market order failed: {entry_resp}")
             return False
 
-        # DCA ladder (opening LIMIT orders)
+        # DCA ladder (opening LIMITs)
         with POSITION_LOCK:
             POSITION["dca_orders"] = []
         dca_prices = []
@@ -745,7 +745,7 @@ def place_initial_position(side, tp_percent=None, sl_percent=None):
             dca_prices.append(dca_price_rounded)
             prev_price = dca_price_rounded
 
-        # TP/SL triggers
+        # TP/SL based on anchor
         furthest_price = (min(dca_prices) if side == "LONG" else max(dca_prices)) if dca_prices else mark_price_rounded
         if side == "LONG":
             sl_trigger = round_price_to_tick(furthest_price * (Decimal("1") - sl_percent / Decimal("100")), TICK_SIZE)
@@ -806,6 +806,7 @@ def place_initial_position(side, tp_percent=None, sl_percent=None):
     except Exception as e:
         print(f"{now()} ❌ Error placing position: {e}")
         return False
+
 
 
 # ---- TP recompute helper (weighted after DCA fills) ----
