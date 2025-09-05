@@ -28,9 +28,9 @@ TRADE_BALANCE_PCT = Decimal("0.20")  # 5% of total USDT contract wallet
 MIN_ORDER_USDT    = Decimal("5")     # safety floor
 
 # === DCA / TP / SL Variables ===
-TREND_TP_PERCENT  = Decimal("0.5")
-TREND_SL_PERCENT  = Decimal("0.5")
-CTREND_TP_PERCENT = Decimal("0.75")
+TREND_TP_PERCENT  = Decimal("0.75")
+TREND_SL_PERCENT  = Decimal("0.75")
+CTREND_TP_PERCENT = Decimal("0.5")
 CTREND_SL_PERCENT = Decimal("0.5")
 ALLOW_COUNTER_TREND = True  # if False, block entries against BIAS
 
