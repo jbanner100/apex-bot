@@ -21,10 +21,10 @@ BINANCE_SYMBOL = "BTC/USDT"      # ccxt spot symbol
 CANDLE_INTERVAL = "5m"           # 5-minute candles for vector/EMA
 TICK_SIZE = Decimal('1')         # adjust if needed (e.g., 0.5 or 0.1)
 SIZE_STEP = Decimal('0.001')     # size step
-LEVERAGE = Decimal('10')
+LEVERAGE = Decimal('15')
 
 # --- Position sizing ---
-TRADE_BALANCE_PCT = Decimal("0.05")  # 5% of total USDT contract wallet
+TRADE_BALANCE_PCT = Decimal("0.20")  # 5% of total USDT contract wallet
 MIN_ORDER_USDT    = Decimal("5")     # safety floor
 
 # === DCA / TP / SL Variables ===
