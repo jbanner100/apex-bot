@@ -1129,9 +1129,6 @@ print(f"{now()} 🔧 _start_daemons_once() returned", flush=True)
 def _boot_threads_once():
     _start_daemons_once()
 
-@app.before_request
-def _ensure_threads():
-    _start_daemons_once()
 
 # Extra diagnostics
 @app.route('/__threads__', methods=['GET'])
