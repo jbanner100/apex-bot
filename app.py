@@ -28,7 +28,6 @@ TRADE_BALANCE_PCT = Decimal("0.05")  # 5% of total USDT contract wallet
 MIN_ORDER_USDT    = Decimal("5")     # safety floor
 
 # === DCA / TP / SL Variables ===
-# NOTE: "0.5" means 0.5%, i.e., Decimal('0.5') == 0.5 percent.
 TREND_TP_PERCENT  = Decimal("0.5")
 TREND_SL_PERCENT  = Decimal("0.5")
 CTREND_TP_PERCENT = Decimal("0.75")
@@ -56,8 +55,8 @@ DASHBOARD_ENABLED = False  # event-only logs by default (no periodic spam)
 PREV_BIAS         = None
 
 # --- Debounced flat cleanup (daemon) ---
-CLEANUP_GRACE_SEC  = 180     # don't auto-clean within 3 min of any order activity
-ZERO_DEBOUNCE_COUNT = 6      # need 6 consecutive zero-size reads before fallback clean
+CLEANUP_GRACE_SEC  = 180
+ZERO_DEBOUNCE_COUNT = 6
 STATE = {"last_activity_ts": 0}
 def mark_activity():
     STATE["last_activity_ts"] = int(time.time())
@@ -108,7 +107,7 @@ try:
     from apexomni.http_private_sign import HttpPrivateSign
     from apexomni.http_public import HttpPublic
 except Exception as _e:
-    print(f"{now()} ⚠️ apexomni import failed: {_e} — running in NO-TRADING mode.")
+    print(f"{now()} ⚠️ apexomni import failed: {_e} — running in NO-TRADING mode.", flush=True)
     APEX_SDK_OK = False
     APEX_OMNI_HTTP_MAIN = NETWORKID_OMNI_MAIN_ARB = None
     HttpPrivateSign = HttpPublic = None
@@ -136,16 +135,16 @@ if APEX_SDK_OK and api_creds["key"] and api_creds["secret"] and api_creds["passp
         )
         client.configs_v3()
         http_public = HttpPublic(APEX_OMNI_HTTP_MAIN)
-        print(f"{now()} ✅ ApeX client initialized.")
+        print(f"{now()} ✅ ApeX client initialized.", flush=True)
     except Exception as e:
-        print(f"{now()} ❌ ApeX init failed: {e} — NO-TRADING mode.")
+        print(f"{now()} ❌ ApeX init failed: {e} — NO-TRADING mode.", flush=True)
         client = None
         http_public = None
 else:
     if not APEX_SDK_OK:
-        print(f"{now()} ℹ️ ApeX SDK missing; NO-TRADING mode.")
+        print(f"{now()} ℹ️ ApeX SDK missing; NO-TRADING mode.", flush=True)
     else:
-        print(f"{now()} ℹ️ ApeX creds not fully set; NO-TRADING mode.")
+        print(f"{now()} ℹ️ ApeX creds not fully set; NO-TRADING mode.", flush=True)
 
 # ========= Binance (ccxt) =========
 binance = ccxt.binance({"enableRateLimit": True})
@@ -188,7 +187,7 @@ def fetch_binance_candles(symbol=BINANCE_SYMBOL, interval=CANDLE_INTERVAL, limit
         df[['open','high','low','close','volume']] = df[['open','high','low','close','volume']].astype(float)
         return df
     except Exception as e:
-        print(f"{now()} ⚠️ Error fetching Binance candles: {e}")
+        print(f"{now()} ⚠️ Error fetching Binance candles: {e}", flush=True)
         return pd.DataFrame()
 
 def compute_ema(df, period=EMA_PERIOD):
@@ -218,11 +217,11 @@ def ema_stats_line() -> str:
         return f"📈 EMA Stats → unavailable ({e})"
 
 def log_event(title: str, *lines: str):
-    print(f"{now()} {title}")
+    print(f"{now()} {title}", flush=True)
     for ln in lines:
         if ln:
-            print(f"    {ln}")
-    print(f"    {ema_stats_line()}")
+            print(f"    {ln}", flush=True)
+    print(f"    {ema_stats_line()}", flush=True)
 
 # ---------------- Bias (4h) ----------------
 ICT_EMA_SLOPE_BARS = 5
@@ -231,12 +230,6 @@ ICT_BOS_BUFFER_PCT = 0.2
 ICT_REQUIRE_BOS = False
 
 def compute_bias():
-    """
-    Bias is computed on 4h Binance Spot BTC:
-    - ICT BOS detection + EMA slope + price vs EMA
-    - Sets BIAS to 'LONG'/'SHORT'/None
-    - Used ONLY to choose TP/SL % per trade (unless ALLOW_COUNTER_TREND=False)
-    """
     global BIAS
     try:
         limit = max(EMA_PERIOD + 200, 300)
@@ -244,7 +237,7 @@ def compute_bias():
         if df is None or df.empty or len(df) < EMA_PERIOD + ICT_EMA_SLOPE_BARS + 10:
             BIAS = None
             if DEBUG_BIAS:
-                print(f"{now()} ⚠️ ICT Bias: insufficient data")
+                print(f"{now()} ⚠️ ICT Bias: insufficient data", flush=True)
             return
 
         df = compute_ema(df, period=EMA_PERIOD)
@@ -303,29 +296,29 @@ def compute_bias():
                 f"{now()} 🧭 ICT Bias -> {BIAS or 'NEUTRAL'} | "
                 f"EMA_slope={'UP' if ema_up else 'DOWN' if ema_down else 'FLAT'} | "
                 f"price_vs_EMA={'ABOVE' if price_above else 'BELOW' if price_below else 'AT'} | "
-                f"ema{EMA_PERIOD}={float(emas[-1]):.2f} | close={float(closes[-1]):.2f}"
+                f"ema{EMA_PERIOD}={float(emas[-1]):.2f} | close={float(closes[-1]):.2f}",
+                flush=True
             )
     except Exception as e:
         BIAS = None
-        print(f"{now()} ⚠️ ICT Bias error: {e}")
+        print(f"{now()} ⚠️ ICT Bias error: {e}", flush=True)
 
 # ==================== Diagnostics / Health ====================
 @app.before_request
 def _log_req():
-    # Do NOT read bodies here; only log method/path to avoid hangs
     try:
         ct  = request.content_type or "-"
         clen = request.content_length if request.content_length is not None else "-"
-        print(f"{now()} ⇢ {request.method} {request.path} | CT={ct} | len={clen}")
+        print(f"{now()} ⇢ {request.method} {request.path} | CT={ct} | len={clen}", flush=True)
     except Exception as e:
-        print(f"{now()} ⇢ {request.method} {request.path} | <log err: {e}>")
+        print(f"{now()} ⇢ {request.method} {request.path} | <log err: {e}>", flush=True)
 
 @app.after_request
 def _log_resp(resp):
     try:
-        print(f"{now()} ⇠ {resp.status} {request.path}")
+        print(f"{now()} ⇠ {resp.status} {request.path}", flush=True)
     except Exception as e:
-        print(f"{now()} ⇠ <log err: {e}>")
+        print(f"{now()} ⇠ <log err: {e}>", flush=True)
     return resp
 
 @app.route('/', methods=['GET'])
@@ -361,14 +354,6 @@ def _debug_status():
 
 # ==================== VECTOR & MF WEBHOOKS + DEV FORCE ENTRY ====================
 def vector_accepted(df: pd.DataFrame, side: str, threshold: float = VECTOR_THRESHOLD) -> bool:
-    """
-    Accept only if:
-      - LONG (GVC): current candle closes > EMA AND the fraction of the *previous* VECTOR_PERIOD
-                    candles with close < EMA is >= threshold
-      - SHORT (RVC): current candle closes < EMA AND the fraction of the *previous* VECTOR_PERIOD
-                     candles with close > EMA is >= threshold
-    Uses the *forming* current candle as 'cur' (like your Mac script).
-    """
     if df is None or df.empty or len(df) < VECTOR_PERIOD + 1:
         return False
     if 'ema' not in df.columns:
@@ -390,27 +375,18 @@ def vector_accepted(df: pd.DataFrame, side: str, threshold: float = VECTOR_THRES
 
 @app.route('/webhook_vc', methods=['POST', 'GET'], strict_slashes=False)
 def webhook_vector():
-    """
-    Vector webhook (GVC/RVC)
-    - Only updates state when ACCEPTED.
-    - Rejected vectors DO NOT clear any existing accepted latch/window.
-    - On accept, sets POSITION['vector_close_timestamp'] and POSITION['vector_side'],
-      and clears the opposite side's latches.
-    - Accepts JSON, form, or text/plain ("GVC"/"RVC").
-    """
     if request.method == 'GET':
         return jsonify({"ok": True, "hint": 'Send "GVC" or "RVC" (JSON/form/text).'}), 200
 
     msg = _parse_tv_message(request)
     ts = int(time.time())
 
-    # Fetch enough candles for a real EMA(50)
     try:
         need = int(EMA_PERIOD) + int(VECTOR_PERIOD) + 5
         df = fetch_binance_candles(symbol=BINANCE_SYMBOL, interval=CANDLE_INTERVAL, limit=need)
         df = compute_ema(df, period=EMA_PERIOD)
     except Exception as e:
-        print(f"{now()} ⚠️ Error fetching EMA for vector: {e}")
+        print(f"{now()} ⚠️ Error fetching EMA for vector: {e}", flush=True)
         df = pd.DataFrame()
 
     if msg == "GVC":
@@ -452,19 +428,11 @@ def webhook_vector():
                         "vector_ts": ts if accepted else None}), 200
 
     else:
-        print(f"{now()} ⚠️ Invalid vector message: {msg}")
+        print(f"{now()} ⚠️ Invalid vector message: {msg}", flush=True)
         return jsonify({"status": "error", "msg": "Invalid vector"}), 400
 
 @app.route('/webhook_mf', methods=['POST', 'GET'], strict_slashes=False)
 def webhook_mf():
-    """
-    Money Flow webhook (MF UP / MF LONG / MF DOWN):
-      • If no vector_ts yet → latch MF early (wait up to MF_LEAD_SEC for a vector).
-      • If vector_ts exists → accept MF only if side matches POSITION['vector_side']
-        AND MF is within [vec_ts - MF_LEAD_SEC, vec_ts + MF_WAIT_SEC].
-      • Latching MF on one side clears the opposite MF latch.
-      • Accepts JSON, form, or text/plain.
-    """
     if request.method == 'GET':
         return jsonify({"ok": True, "hint": 'Send "MF UP" / "MF LONG" / "MF DOWN" (JSON/form/text).'}), 200
 
@@ -517,11 +485,6 @@ def webhook_mf():
 
 @app.route('/test/force_entry', methods=['POST', 'GET'], strict_slashes=False)
 def test_force_entry():
-    """
-    Dev-only: force confluence for LONG or SHORT and let main_loop place the trade.
-    GET returns a usage hint. POST body example:
-      {"side":"LONG"|"SHORT","set_bias":"LONG"|"SHORT"?, "allow_counter":true|false?}
-    """
     if request.method == 'GET':
         return jsonify({
             "ok": True,
@@ -537,19 +500,19 @@ def test_force_entry():
     set_bias = data.get("set_bias", None)
     if isinstance(set_bias, str) and set_bias.upper() in ("LONG", "SHORT"):
         BIAS = set_bias.upper()
-        print(f"{now()} 🧭 TEST: BIAS set to {BIAS}")
+        print(f"{now()} 🧭 TEST: BIAS set to {BIAS}", flush=True)
 
     allow_counter = data.get("allow_counter", None)
     if allow_counter is True:
         ALLOW_COUNTER_TREND = True
-        print(f"{now()} 🧪 TEST: ALLOW_COUNTER_TREND forced True")
+        print(f"{now()} 🧪 TEST: ALLOW_COUNTER_TREND forced True", flush=True)
 
     ENTRY_ENABLED = True
 
     now_ts = int(time.time())
     with POSITION_LOCK:
         POSITION["vector_close_timestamp"] = now_ts
-        POSITION["vector_side"] = side  # ensure MF/decide_entry sees the latched side
+        POSITION["vector_side"] = side
         if side == "LONG":
             LONG_FLAGS.update({"vector": True, "vector_accepted": True, "mf": True})
             LONG_TIMESTAMPS.update({"vector": now_ts, "mf": now_ts})
@@ -561,7 +524,7 @@ def test_force_entry():
             LONG_FLAGS.update({"vector": False, "vector_accepted": False, "mf": False})
             LONG_TIMESTAMPS.update({"vector": 0, "mf": 0})
 
-    print(f"{now()} ✅ TEST: Forced confluence for {side}. main_loop should place the trade shortly.")
+    print(f"{now()} ✅ TEST: Forced confluence for {side}. main_loop should place the trade shortly.", flush=True)
     return jsonify({"status": "ok", "forced_side": side, "bias": BIAS, "ts": now_ts}), 200
 
 @app.route('/debug/veccheck', methods=['GET'])
@@ -590,10 +553,6 @@ def _veccheck():
 
 # ---- TP/SL % selection (based on bias at entry) ----
 def pick_tp_sl_for(entry_side: str) -> Tuple[Decimal, Decimal]:
-    """
-    Returns (tp_percent, sl_percent) as Decimal percentages based on BIAS.
-    BIAS only selects the % pair; it does not time entries unless ALLOW_COUNTER_TREND=False.
-    """
     if BIAS in ("LONG", "SHORT") and entry_side == BIAS:
         return TREND_TP_PERCENT, TREND_SL_PERCENT
     else:
@@ -601,9 +560,6 @@ def pick_tp_sl_for(entry_side: str) -> Tuple[Decimal, Decimal]:
 
 # ---- Apex account helpers ----
 def get_usdt_contract_balance() -> Decimal:
-    """
-    Returns TOTAL USDT balance from the contract wallet.
-    """
     if not client:
         return Decimal("0")
     try:
@@ -612,17 +568,13 @@ def get_usdt_contract_balance() -> Decimal:
             if w.get("token") == "USDT":
                 return Decimal(str(w.get("balance", "0")))
     except Exception as e:
-        print(f"{now()} ⚠️ get_usdt_contract_balance error: {e}")
+        print(f"{now()} ⚠️ get_usdt_contract_balance error: {e}", flush=True)
     return Decimal("0")
 
 # ---------------- Orders & Entry ----------------
 def place_tp_order(close_side: str, trigger_price: Decimal, size: Decimal):
-    """
-    TAKE_PROFIT_MARKET; reduceOnly=True
-    close_side: 'SELL' when LONG position, 'BUY' when SHORT position
-    """
     if not client:
-        print(f"{now()} ⚠️ TP skipped — NO-TRADING mode.")
+        print(f"{now()} ⚠️ TP skipped — NO-TRADING mode.", flush=True)
         return None
     try:
         sz = round_size_to_step(size, SIZE_STEP)
@@ -635,19 +587,15 @@ def place_tp_order(close_side: str, trigger_price: Decimal, size: Decimal):
         tp_id = (resp.get("data") or {}).get("id")
         with POSITION_LOCK:
             POSITION["tp_id"] = tp_id; POSITION["tp"] = tp_price
-        print(f"{now()} 🎯 TP placed (TAKE_PROFIT_MARKET) @ {tp_price} | id={tp_id}")
+        print(f"{now()} 🎯 TP placed (TAKE_PROFIT_MARKET) @ {tp_price} | id={tp_id}", flush=True)
         return tp_id
     except Exception as e:
-        print(f"{now()} ⚠️ Failed to place TP: {e}")
+        print(f"{now()} ⚠️ Failed to place TP: {e}", flush=True)
         return None
 
 def place_sl_order(entry_side: str, last_dca_price: Decimal, sl_percent: Decimal):
-    """
-    STOP_MARKET; reduceOnly=True
-    SL is x% away from the LAST (furthest) DCA price and never moved.
-    """
     if not client:
-        print(f"{now()} ⚠️ SL skipped — NO-TRADING mode.")
+        print(f"{now()} ⚠️ SL skipped — NO-TRADING mode.", flush=True)
         return None
     try:
         if entry_side == "LONG":
@@ -668,22 +616,20 @@ def place_sl_order(entry_side: str, last_dca_price: Decimal, sl_percent: Decimal
         sl_id = (resp.get("data") or {}).get("id")
         with POSITION_LOCK:
             POSITION["sl"] = sl_price; POSITION["sl_id"] = sl_id
-        print(f"{now()} 🛑 SL placed (STOP_MARKET) @ {sl_price} | id={sl_id}")
+        print(f"{now()} 🛑 SL placed (STOP_MARKET) @ {sl_price} | id={sl_id}", flush=True)
         return sl_id
     except Exception as e:
-        print(f"{now()} ⚠️ Failed to place SL: {e}")
+        print(f"{now()} ⚠️ Failed to place SL: {e}", flush=True)
         return None
 
 def place_initial_position(side, tp_percent=None, sl_percent=None):
     if not (client and http_public):
-        print(f"{now()} ❌ Trading disabled (ApeX SDK/creds not available).")
+        print(f"{now()} ❌ Trading disabled (ApeX SDK/creds not available).", flush=True)
         return False
     try:
-        # Pick TP/SL % if not provided
         if tp_percent is None or sl_percent is None:
             tp_percent, sl_percent = pick_tp_sl_for(side)
 
-        # Balance & sizing
         acct = client.get_account_v3()
         usdt_balance = Decimal('0')
         for w in acct.get("contractWallets", []):
@@ -691,7 +637,7 @@ def place_initial_position(side, tp_percent=None, sl_percent=None):
                 usdt_balance = Decimal(str(w.get("balance", "0")))
                 break
         if usdt_balance <= 0:
-            print(f"{now()} ❌ USDT balance too low: {usdt_balance}")
+            print(f"{now()} ❌ USDT balance too low: {usdt_balance}", flush=True)
             return False
 
         trade_usdt = max(usdt_balance * TRADE_BALANCE_PCT, MIN_ORDER_USDT)
@@ -713,7 +659,7 @@ def place_initial_position(side, tp_percent=None, sl_percent=None):
         )
         entry_id = (entry_resp.get("data") or {}).get("id")
         if not entry_id:
-            print(f"{now()} ❌ Initial market order failed: {entry_resp}")
+            print(f"{now()} ❌ Initial market order failed: {entry_resp}", flush=True)
             return False
 
         # DCA ladder (opening LIMITs)
@@ -769,7 +715,7 @@ def place_initial_position(side, tp_percent=None, sl_percent=None):
             timestampSeconds=int(time.time())
         )
         tp_id = (tp_resp.get("data") or {}).get("id")
-        print(f"{now()} 🎯 TP placed (TAKE_PROFIT_MARKET) @ {tp_trigger} | id={tp_id}")
+        print(f"{now()} 🎯 TP placed (TAKE_PROFIT_MARKET) @ {tp_trigger} | id={tp_id}", flush=True)
 
         # Place SL
         sl_resp = client.create_order_v3(
@@ -783,7 +729,7 @@ def place_initial_position(side, tp_percent=None, sl_percent=None):
             timestampSeconds=int(time.time())
         )
         sl_id = (sl_resp.get("data") or {}).get("id")
-        print(f"{now()} 🛑 SL placed (STOP_MARKET) @ {sl_trigger} | id={sl_id}")
+        print(f"{now()} 🛑 SL placed (STOP_MARKET) @ {sl_trigger} | id={sl_id}", flush=True)
 
         # Update local state
         with POSITION_LOCK:
@@ -801,11 +747,11 @@ def place_initial_position(side, tp_percent=None, sl_percent=None):
                 "tp_percent": tp_percent,
                 "sl_percent": sl_percent
             })
-        print(f"{now()} ✅ {side} market order placed: {initial_size} BTC @ {mark_price_rounded}")
+        print(f"{now()} ✅ {side} market order placed: {initial_size} BTC @ {mark_price_rounded}", flush=True)
         return True
 
     except Exception as e:
-        print(f"{now()} ❌ Error placing position: {e}")
+        print(f"{now()} ❌ Error placing position: {e}", flush=True)
         return False
 
 # ---- TP recompute helper (weighted after DCA fills) ----
@@ -825,62 +771,49 @@ def compute_avg_entry_and_tp():
 
 # ---------------- Monitors ----------------
 def _status(info) -> str:
-    """Upper-cased order status from an ApeX order dict (or '')."""
     return str((info or {}).get("status", "")).upper()
 
 def cancel_order_id(order_id: str, label: str = "") -> bool:
-    """
-    Best-effort cancel by known order id.
-    1) Try delete_order_v3(id=...)  (official)
-    2) Fall back to cancel_order_v3(symbol, orderId=...)
-    Any 'not found / filled / triggered / conflict' is treated as already closed.
-    """
     if not client or not order_id:
         return False
     try:
         client.delete_order_v3(id=str(order_id))
-        print(f"{now()} 🧹 Canceled {label or 'order'} via delete_order_v3: {order_id}")
+        print(f"{now()} 🧹 Canceled {label or 'order'} via delete_order_v3: {order_id}", flush=True)
         return True
     except AttributeError:
         pass
     except Exception as e:
         msg = str(e).lower()
         if any(k in msg for k in ("not found", "filled", "triggered", "conflict")):
-            print(f"{now()} 🧹 {label or 'order'} {order_id} already not-cancelable (ok): {e}")
+            print(f"{now()} 🧹 {label or 'order'} {order_id} already not-cancelable (ok): {e}", flush=True)
             return True
-        print(f"{now()} ⚠️ delete_order_v3({order_id}) error: {e}")
+        print(f"{now()} ⚠️ delete_order_v3({order_id}) error: {e}", flush=True)
     try:
         client.cancel_order_v3(symbol=APEX_SYMBOL, orderId=str(order_id))
-        print(f"{now()} 🧹 Canceled {label or 'order'} via cancel_order_v3: {order_id}")
+        print(f"{now()} 🧹 Canceled {label or 'order'} via cancel_order_v3: {order_id}", flush=True)
         return True
     except AttributeError:
-        print(f"{now()} ⚠️ cancel_order_v3 not available for {order_id}")
+        print(f"{now()} ⚠️ cancel_order_v3 not available for {order_id}", flush=True)
         return False
     except Exception as e:
         msg = str(e).lower()
         if any(k in msg for k in ("not found", "filled", "triggered", "conflict")):
-            print(f"{now()} 🧹 {label or 'order'} {order_id} already not-cancelable (ok): {e}")
+            print(f"{now()} 🧹 {label or 'order'} {order_id} already not-cancelable (ok): {e}", flush=True)
             return True
-        print(f"{now()} ⚠️ cancel_order_v3({order_id}) error: {e}")
+        print(f"{now()} ⚠️ cancel_order_v3({order_id}) error: {e}", flush=True)
         return False
 
 def cancel_dcas_local_only():
     with POSITION_LOCK:
         ids = [oid for oid in POSITION.get("dca_orders", []) if oid]
     if not ids: return
-    print(f"{now()} 🧹 Cancelling {len(ids)} stored DCA orders...")
+    print(f"{now()} 🧹 Cancelling {len(ids)} stored DCA orders...", flush=True)
     for oid in ids:
         cancel_order_id(oid, label="DCA")
     with POSITION_LOCK:
         POSITION["dca_orders"] = []
 
 def dca_tp_monitor():
-    """
-    Minimal & robust monitor:
-      • Reweights TP when a DCA LIMIT fills (SL untouched).
-      • Declares close ONLY when TP or SL actually reaches a terminal fill state.
-      • On close: cancel the other protection, cancel all stored DCA IDs, reset state.
-    """
     TERMINAL_STATES = {"FILLED", "TRIGGERED", "EXECUTED", "COMPLETED", "DONE"}
     while True:
         try:
@@ -901,7 +834,7 @@ def dca_tp_monitor():
                     info   = client.get_order_v3(symbol=APEX_SYMBOL, orderId=order_id).get("data") or {}
                     status = _status(info)
                 except Exception as e:
-                    print(f"{now()} ⚠️ Fetch DCA {order_id} error: {e}")
+                    print(f"{now()} ⚠️ Fetch DCA {order_id} error: {e}", flush=True)
                     continue
                 if status == "FILLED":
                     dca_qty  = Decimal(str(info.get("size") or "0"))
@@ -923,7 +856,7 @@ def dca_tp_monitor():
                         tp_id = place_tp_order(tp_side, new_tp, cur_size)
                         with POSITION_LOCK:
                             POSITION["tp"] = new_tp
-                        print(f"{now()} 🟢 Weighted TP -> avg={avg_entry} | TP={new_tp} | size={cur_size}")
+                        print(f"{now()} 🟢 Weighted TP -> avg={avg_entry} | TP={new_tp} | size={cur_size}", flush=True)
 
             closed = False; reason = None
             with POSITION_LOCK:
@@ -935,7 +868,7 @@ def dca_tp_monitor():
                     if _status(tp_info) in TERMINAL_STATES:
                         closed, reason = True, "TP filled"
                 except Exception as e:
-                    print(f"{now()} ⚠️ TP status check error: {e}")
+                    print(f"{now()} ⚠️ TP status check error: {e}", flush=True)
 
             if (not closed) and sl_id and client:
                 try:
@@ -943,10 +876,10 @@ def dca_tp_monitor():
                     if _status(sl_info) in TERMINAL_STATES:
                         closed, reason = True, "SL filled"
                 except Exception as e:
-                    print(f"{now()} ⚠️ SL status check error: {e}")
+                    print(f"{now()} ⚠️ SL status check error: {e}", flush=True)
 
             if closed:
-                print(f"{now()} ✅ Position closed ({reason}). Cleaning DCAs/TP/SL and resetting state.")
+                print(f"{now()} ✅ Position closed ({reason}). Cleaning DCAs/TP/SL and resetting state.", flush=True)
                 if tp_id: cancel_order_id(tp_id, label="TP")
                 if sl_id: cancel_order_id(sl_id, label="SL")
                 cancel_dcas_local_only()
@@ -964,7 +897,7 @@ def dca_tp_monitor():
 
             time.sleep(1)
         except Exception as e:
-            print(f"{now()} ⚠️ dca_tp_monitor error: {e}")
+            print(f"{now()} ⚠️ dca_tp_monitor error: {e}", flush=True)
             time.sleep(1)
 
 def dashboard():
@@ -983,23 +916,23 @@ def dashboard():
             now_ts = time.time()
             if snap != last and (now_ts - last_print_ts) >= MIN_SECS:
                 bias_display = BIAS if BIAS else "NEUTRAL"
-                print(f"{now()} 📊 DASHBOARD")
+                print(f"{now()} 📊 DASHBOARD", flush=True)
                 if snap[0]:
-                    print(f"    Side: {snap[1]} | Size: {snap[2]} | Entry: {snap[3]} | SL: {snap[4]} | TP: {snap[5]}")
+                    print(f"    Side: {snap[1]} | Size: {snap[2]} | Entry: {snap[3]} | SL: {snap[4]} | TP: {snap[5]}", flush=True)
                 else:
                     vts = snap[9]
                     if vts:
                         earliest = vts - int(MF_LEAD_SEC); latest = vts + int(MF_WAIT_SEC)
-                        print(f"    No open position | Bias: {bias_display}")
-                        print(f"    Vector window: [{earliest} → {latest}]")
+                        print(f"    No open position | Bias: {bias_display}", flush=True)
+                        print(f"    Vector window: [{earliest} → {latest}]", flush=True)
                     else:
-                        print(f"    No open position | Bias: {bias_display}")
-                        print(f"    Vector window: none")
-                print(f"    {ema_stats_line()}")
+                        print(f"    No open position | Bias: {bias_display}", flush=True)
+                        print(f"    Vector window: none", flush=True)
+                print(f"    {ema_stats_line()}", flush=True)
                 last = snap; last_print_ts = now_ts
             time.sleep(1)
         except Exception as e:
-            print(f"{now()} ⚠️ Dashboard error: {e}")
+            print(f"{now()} ⚠️ Dashboard error: {e}", flush=True)
             time.sleep(2)
 
 def bias_monitor():
@@ -1009,13 +942,13 @@ def bias_monitor():
             old = BIAS
             compute_bias()
             if BIAS != old:
-                print(f"{now()} 🧭 Bias changed")
-                print(f"    {old or 'None'} → {BIAS or 'None'}")
-                print(f"    {ema_stats_line()}")
+                print(f"{now()} 🧭 Bias changed", flush=True)
+                print(f"    {old or 'None'} → {BIAS or 'None'}", flush=True)
+                print(f"    {ema_stats_line()}", flush=True)
             PREV_BIAS = BIAS
             time.sleep(60 * 60)
         except Exception as e:
-            print(f"{now()} ⚠️ Bias monitor error: {e}")
+            print(f"{now()} ⚠️ Bias monitor error: {e}", flush=True)
             time.sleep(60)
 
 def vector_window_active() -> bool:
@@ -1026,7 +959,6 @@ def vector_window_active() -> bool:
     return (ts - int(MF_LEAD_SEC)) <= now_ts <= (ts + int(MF_WAIT_SEC))
 
 def expire_vector_if_out_of_window():
-    """If the Vector window has ended without an entry, clear vector flags & timestamp."""
     with POSITION_LOCK:
         ts = POSITION.get("vector_close_timestamp")
         if not ts:
@@ -1039,10 +971,9 @@ def expire_vector_if_out_of_window():
         SHORT_FLAGS.update({"vector": False, "vector_accepted": False})
         POSITION["vector_close_timestamp"] = None
         POSITION["vector_side"] = None
-    print(f"{now()} ⏱️ Vector window expired — cleared vector flags.")
+    print(f"{now()} ⏱️ Vector window expired — cleared vector flags.", flush=True)
 
 def expire_mf_if_stale():
-    """If MF arrived first but no Vector was accepted within MF_LEAD_SEC, clear MF latch."""
     now_ts = int(time.time())
     vec_ts = POSITION.get("vector_close_timestamp")
     if vec_ts is not None:
@@ -1051,19 +982,14 @@ def expire_mf_if_stale():
         mf_ts = LONG_TIMESTAMPS.get("mf") or 0
         if now_ts - int(mf_ts) > int(MF_LEAD_SEC):
             LONG_FLAGS["mf"] = False; LONG_TIMESTAMPS["mf"] = 0
-            print(f"{now()} ⏱️ MF LONG latch expired — no Vector within {int(MF_LEAD_SEC)}s.")
+            print(f"{now()} ⏱️ MF LONG latch expired — no Vector within {int(MF_LEAD_SEC)}s.", flush=True)
     if SHORT_FLAGS.get("mf"):
         mf_ts = SHORT_TIMESTAMPS.get("mf") or 0
         if now_ts - int(mf_ts) > int(MF_LEAD_SEC):
             SHORT_FLAGS["mf"] = False; SHORT_TIMESTAMPS["mf"] = 0
-            print(f"{now()} ⏱️ MF SHORT latch expired — no Vector within {int(MF_LEAD_SEC)}s.")
+            print(f"{now()} ⏱️ MF SHORT latch expired — no Vector within {int(MF_LEAD_SEC)}s.", flush=True)
 
 def decide_entry():
-    """
-    Confluence requires BOTH signals for the same side AND the MF timestamp
-    within [vector_ts - MF_LEAD_SEC, vector_ts + MF_WAIT_SEC].
-    NO re-check of EMA here — acceptance was finalized in /webhook_vc.
-    """
     long_ready  = bool(LONG_FLAGS.get("vector_accepted")) and bool(LONG_FLAGS.get("mf"))
     short_ready = bool(SHORT_FLAGS.get("vector_accepted")) and bool(SHORT_FLAGS.get("mf"))
     if long_ready == short_ready:
@@ -1088,7 +1014,6 @@ def decide_entry():
 def main_loop():
     while True:
         try:
-            # Maintain latches/windows exactly like your Mac code
             expire_vector_if_out_of_window()
             expire_mf_if_stale()
 
@@ -1098,7 +1023,7 @@ def main_loop():
             if ENTRY_ENABLED and not open_:
                 side = decide_entry()
                 if side in ("LONG", "SHORT"):
-                    print(f"{now()} ✅ Confluence met for {side} → placing initial position")
+                    print(f"{now()} ✅ Confluence met for {side} → placing initial position", flush=True)
                     ok = place_initial_position(side)
                     if ok:
                         with POSITION_LOCK:
@@ -1112,17 +1037,55 @@ def main_loop():
                         time.sleep(2)
             time.sleep(1)
         except Exception as e:
-            print(f"{now()} ⚠️ Main loop error: {e}")
+            print(f"{now()} ⚠️ Main loop error: {e}", flush=True)
             time.sleep(1)
 
-# ---------------- Thread Supervisor (Render/Gunicorn safe) ----------------
+# ---------------- Thread Supervisor (render/gunicorn safe) ----------------
 _started = False
 _START_LOCK = threading.Lock()
 
+def _spawn(name, fn):
+    def runner():
+        print(f"{now()} ▶️ {name} started", flush=True)
+        try:
+            fn()
+        except Exception as e:
+            print(f"{now()} 💥 {name} crashed: {e}\n{traceback.format_exc()}", flush=True)
+    t = threading.Thread(target=runner, name=name, daemon=True)
+    t.start()
+    return t
+
+def _supervisor():
+    # Restarts any missing worker thread every 10s
+    while True:
+        try:
+            names = {t.name for t in threading.enumerate()}
+            if "Main Loop" not in names:
+                _spawn("Main Loop", main_loop)
+                print(f"{now()} ♻️ Supervisor started Main Loop", flush=True)
+            if "DCA/TP Monitor" not in names:
+                _spawn("DCA/TP Monitor", dca_tp_monitor)
+                print(f"{now()} ♻️ Supervisor started DCA/TP Monitor", flush=True)
+            if "Bias Monitor" not in names:
+                _spawn("Bias Monitor", bias_monitor)
+                print(f"{now()} ♻️ Supervisor started Bias Monitor", flush=True)
+            if DASHBOARD_ENABLED and "Dashboard" not in names:
+                _spawn("Dashboard", dashboard)
+                print(f"{now()} ♻️ Supervisor started Dashboard", flush=True)
+            time.sleep(10)
+        except Exception as e:
+            print(f"{now()} ⚠️ Supervisor error: {e}\n{traceback.format_exc()}", flush=True)
+            time.sleep(5)
+
+def _heartbeat():
+    while True:
+        print(f"{now()} ❤️ heartbeat", flush=True)
+        time.sleep(15)
+
 def _start_daemons_once():
     """
-    Boot the worker threads exactly once per process (works under Gunicorn and local).
-    Safe to call many times; only the first call in a process starts threads.
+    Boot worker threads exactly once per process.
+    Called at import, on first request, and via /__kick__.
     """
     global _started
     if _started:
@@ -1132,33 +1095,40 @@ def _start_daemons_once():
             return
         try:
             existing = {t.name for t in threading.enumerate()}
-            print(f"{now()} 🧵 existing threads before start: {sorted(existing)}")
+            print(f"{now()} 🧵 existing threads before start: {sorted(existing)}", flush=True)
+            print(f"{now()} 🚀 Starting threads...", flush=True)
 
-            print(f"{now()} 🚀 Starting threads...")
             if "DCA/TP Monitor" not in existing:
-                threading.Thread(target=dca_tp_monitor, name="DCA/TP Monitor", daemon=True).start()
+                _spawn("DCA/TP Monitor", dca_tp_monitor)
             if "Main Loop" not in existing:
-                threading.Thread(target=main_loop, name="Main Loop", daemon=True).start()
+                _spawn("Main Loop", main_loop)
             if DASHBOARD_ENABLED and "Dashboard" not in existing:
-                threading.Thread(target=dashboard, name="Dashboard", daemon=True).start()
+                _spawn("Dashboard", dashboard)
             if "Bias Monitor" not in existing:
-                threading.Thread(target=bias_monitor, name="Bias Monitor", daemon=True).start()
+                _spawn("Bias Monitor", bias_monitor)
+            if "Supervisor" not in existing:
+                _spawn("Supervisor", _supervisor)
+            if "Heartbeat" not in existing:
+                _spawn("Heartbeat", _heartbeat)
 
             after = {t.name for t in threading.enumerate()}
-            print(f"{now()} 🧵 threads after start: {sorted(after)}")
+            print(f"{now()} 🧵 threads after start: {sorted(after)}", flush=True)
 
             _started = True
-            print(f"{now()} ✅ Bot started and awaiting Vector/MF signals... (ENTRY_ENABLED={ENTRY_ENABLED})")
+            print(f"{now()} ✅ Bot started and awaiting Vector/MF signals... (ENTRY_ENABLED={ENTRY_ENABLED})", flush=True)
         except Exception as e:
-            # Never crash the worker; just log
-            print(f"{now()} ❌ Thread start error: {e}\n{traceback.format_exc()}")
+            print(f"{now()} ❌ Thread start error: {e}\n{traceback.format_exc()}", flush=True)
 
-# Start threads at import time (works for both python run and gunicorn import)
-print(f"{now()} 🔧 server.py imported, calling _start_daemons_once()")
+# Start threads at import (gunicorn worker import path)
+print(f"{now()} 🔧 server.py imported, calling _start_daemons_once()", flush=True)
 _start_daemons_once()
-print(f"{now()} 🔧 _start_daemons_once() returned")
+print(f"{now()} 🔧 _start_daemons_once() returned", flush=True)
 
-# Safety net: ensure threads are running on any request
+# Safety nets: ensure threads on any request & on first request
+@app.before_first_request
+def _boot_threads_once():
+    _start_daemons_once()
+
 @app.before_request
 def _ensure_threads():
     _start_daemons_once()
@@ -1185,13 +1155,8 @@ def __kick__():
     }), 200
 
 # ---------------- Local run (Render-ready: bind $PORT) ----------------
-
-# --- EXTRA safety: start threads on first request too ---
-@app.before_first_request
-def _boot_threads_once():
-    _start_daemons_once()
-
 if __name__ == "__main__":
     port = int(os.getenv("PORT", "5008"))  # Render supplies $PORT
     app.run(host="0.0.0.0", port=port, threaded=True, use_reloader=False)
+
 
