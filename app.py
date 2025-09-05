@@ -1040,53 +1040,85 @@ def main_loop():
             print(f"{now()} ⚠️ Main loop error: {e}", flush=True)
             time.sleep(1)
 
-# ---------------- Thread Supervisor (Render/Gunicorn safe) ----------------
-_started = False
+# ---------------- Thread Supervisor (Render/Gunicorn safe, self-healing) ----------------
+_STARTED = False
 _START_LOCK = threading.Lock()
 
+# Names we expect to see running
+REQUIRED_THREADS = [
+    ("DCA/TP Monitor", dca_tp_monitor),
+    ("Main Loop",      main_loop),
+    ("Bias Monitor",   bias_monitor),
+]
+
+def _start_named_thread(name: str, target):
+    try:
+        t = threading.Thread(target=target, name=name, daemon=True)
+        t.start()
+        print(f"{now()} ▶️ {name} started")
+    except Exception as e:
+        print(f"{now()} ❌ failed to start {name}: {e}\n{traceback.format_exc()}")
+
+def _ensure_required_threads():
+    """Idempotent: (re)start any missing worker threads."""
+    existing = {t.name for t in threading.enumerate()}
+    for name, target in REQUIRED_THREADS:
+        if name not in existing:
+            _start_named_thread(name, target)
+
 def _start_daemons_once():
-    """
-    Boot the worker threads exactly once per process (works under Gunicorn and local).
-    Safe to call many times; only the first call in a process starts threads.
-    """
-    global _started
-    if _started:
+    """Safe to call many times; first successful call starts everything."""
+    global _STARTED
+    if _STARTED:
         return
     with _START_LOCK:
-        if _started:
+        if _STARTED:
             return
         try:
-            existing = {t.name for t in threading.enumerate()}
-            print(f"{now()} 🧵 existing threads before start: {sorted(existing)}")
-
-            print(f"{now()} 🚀 Starting threads...")
-            if "DCA/TP Monitor" not in existing:
-                threading.Thread(target=dca_tp_monitor, name="DCA/TP Monitor", daemon=True).start()
-            if "Main Loop" not in existing:
-                threading.Thread(target=main_loop, name="Main Loop", daemon=True).start()
-            if DASHBOARD_ENABLED and "Dashboard" not in existing:
-                threading.Thread(target=dashboard, name="Dashboard", daemon=True).start()
-            if "Bias Monitor" not in existing:
-                threading.Thread(target=bias_monitor, name="Bias Monitor", daemon=True).start()
-
-            after = {t.name for t in threading.enumerate()}
-            print(f"{now()} 🧵 threads after start: {sorted(after)}")
-
-            _started = True
+            print(f"{now()} 🧵 existing threads before start: {sorted(t.name for t in threading.enumerate())}")
+            _ensure_required_threads()
+            # Also run a lightweight watchdog & heartbeat so workers stay up even if they die.
+            if "Supervisor" not in {t.name for t in threading.enumerate()}:
+                threading.Thread(target=_supervisor_loop, name="Supervisor", daemon=True).start()
+            if "Heartbeat" not in {t.name for t in threading.enumerate()}:
+                threading.Thread(target=_heartbeat_loop, name="Heartbeat", daemon=True).start()
+            print(f"{now()} 🧵 threads after start: {sorted(t.name for t in threading.enumerate())}")
+            _STARTED = True
             print(f"{now()} ✅ Bot started and awaiting Vector/MF signals... (ENTRY_ENABLED={ENTRY_ENABLED})")
         except Exception as e:
-            # Never crash the worker; just log
             print(f"{now()} ❌ Thread start error: {e}\n{traceback.format_exc()}")
 
-# Start threads at import time (works for both python run and gunicorn import)
+def _supervisor_loop():
+    """Every 2s, make sure the three worker threads exist; re-create if they crash."""
+    print(f"{now()} ▶️ Supervisor started")
+    while True:
+        try:
+            _ensure_required_threads()
+            time.sleep(2)
+        except Exception as e:
+            print(f"{now()} ⚠️ Supervisor error: {e}")
+            time.sleep(2)
+
+def _heartbeat_loop():
+    """Just a periodic log so you can see the process is alive."""
+    print(f"{now()} ▶️ Heartbeat started")
+    while True:
+        try:
+            print(f"{now()} ❤️ heartbeat")
+            time.sleep(30)
+        except Exception:
+            time.sleep(30)
+
+# Start threads at import time (works for both `python app.py` and Gunicorn import)
 print(f"{now()} 🔧 app.py imported, calling _start_daemons_once()")
 _start_daemons_once()
 print(f"{now()} 🔧 _start_daemons_once() returned")
 
 # Safety net: ensure threads are running on any request
 @app.before_request
-def _ensure_threads():
+def _ensure_threads_on_request():
     _start_daemons_once()
+    _ensure_required_threads()
 
 # Extra diagnostics
 @app.route('/__threads__', methods=['GET'])
@@ -1098,6 +1130,7 @@ def __threads__():
 def __kick__():
     try:
         _start_daemons_once()
+        _ensure_required_threads()
     except Exception as e:
         return jsonify({"ok": False, "error": f"kick failed: {e}"}), 500
     names = [t.name for t in threading.enumerate()]
